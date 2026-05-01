@@ -196,16 +196,16 @@ def _check_inventory_api(finnkode: str) -> bool:
     params = {"adId": finnkode, "type": "inventory"}
     try:
         r = requests.get(url, headers=headers, params=params, timeout=15)
+        log(f"      [INV-API] status={r.status_code} finnkode={finnkode}")
         if r.status_code != 200:
-            log(f"      [INV-API] {r.status_code} for {finnkode}")
             return False
+        raw = r.text[:500]
+        log(f"      [INV-API] body={raw!r}")
         data = r.json()
-        # Response shape varies; check common envelope keys first
         for key in ("items", "results", "ads", "data", "documents"):
             val = data.get(key)
             if val:
                 return True
-        # Top-level list
         if isinstance(data, list) and data:
             return True
     except Exception as e:
