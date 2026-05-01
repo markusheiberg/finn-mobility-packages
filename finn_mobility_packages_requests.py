@@ -413,7 +413,7 @@ def bucket_label(p_from: int | None, p_to: int | None) -> str:
 def main():
     today_str = date.today().isoformat()
     buckets = price_buckets(step=10_000, upper=1_000_000)
-    log(f"Starting scrape: {len(buckets)} price buckets (10k NOK steps, cap=1M)", flush=True)
+    log(f"Starting scrape: {len(buckets)} price buckets (10k NOK steps, cap=1M)")
 
     summary_rows = []
     all_debug: list[dict] = []
