@@ -1,3 +1,5 @@
+import math
+import random
 import re
 import time
 import requests
@@ -17,7 +19,7 @@ HEADERS = {
     "Accept-Language": "nb-NO,nb;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
-MAX_PAGES_PER_BUCKET = 200
+SAMPLE_FRACTION = 0.05
 OUTPUT_CSV = "finn_mobility_packages_summary.csv"
 DEBUG_CSV = "finn_mobility_debug.csv"
 
@@ -51,50 +53,95 @@ def search_url(page, price_from, price_to):
 
 def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
     """
-    Scrape all search pages for this price bucket.
-    Returns list of (finnkode, org_name).
+    Sample 5% of listings for this price bucket from randomly chosen pages.
+    Page 1 is always fetched first to get the total count; remaining pages
+    are drawn at random across the full page range to avoid recency bias.
     """
-    listings: list[tuple[str, str]] = []
-    seen_fk: set[str] = set()
     label = bucket_label(price_from, price_to)
 
-    for page in range(1, MAX_PAGES_PER_BUCKET + 1):
-        url = search_url(page, price_from, price_to)
-        log(f"  [SEARCH] {url}")
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=30)
-            r.raise_for_status()
-        except Exception as e:
-            log(f"  [ERR] {label} page={page} -> {e}")
-            break
+    # --- Page 1: get total count and first batch of articles ---
+    url = search_url(1, price_from, price_to)
+    log(f"  [SEARCH] {url}")
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+    except Exception as e:
+        log(f"  [ERR] {label} page=1 -> {e}")
+        return []
 
-        soup = BeautifulSoup(r.text, "html.parser")
-        articles = soup.find_all("article")
-        if not articles:
-            log(f"  [STOP] {label} page={page} no articles")
-            break
+    soup = BeautifulSoup(r.text, "html.parser")
+    articles = soup.find_all("article")
+    if not articles:
+        log(f"  [STOP] {label} no articles on page 1")
+        return []
+
+    total = _parse_total_count(soup)
+    page_size = len(articles)
+
+    if total is None:
+        log(f"  [WARN] {label} could not parse total count, using page 1 only")
+        total = page_size
+
+    total_pages = math.ceil(total / page_size)
+    target = math.ceil(total * SAMPLE_FRACTION)
+    pages_needed = math.ceil(target / page_size)
+
+    if pages_needed >= total_pages:
+        selected_pages = list(range(1, total_pages + 1))
+    else:
+        # Randomly pick remaining pages across the full range (excluding page 1)
+        extra = random.sample(range(2, total_pages + 1), pages_needed - 1)
+        selected_pages = sorted([1] + extra)
+
+    log(f"  [SAMPLE] {label} total={total} target={target} "
+        f"pages={len(selected_pages)}/{total_pages} selected={selected_pages}")
+
+    listings: list[tuple[str, str]] = []
+    seen_fk: set[str] = set()
+
+    for page in selected_pages:
+        page_soup = soup if page == 1 else _fetch_page(label, page, price_from, price_to)
+        if page_soup is None:
+            continue
 
         new = 0
-        for art in articles:
+        for art in page_soup.find_all("article"):
             fk, org = _parse_article(art)
-            if not fk or fk in seen_fk:
-                continue
-            seen_fk.add(fk)
-            listings.append((fk, org))
-            new += 1
+            if fk and fk not in seen_fk:
+                seen_fk.add(fk)
+                listings.append((fk, org))
+                new += 1
 
         log(f"  [PAGE] {label} page={page} new={new} total={len(listings)}")
-
-        if new == 0:
-            log(f"  [STOP] {label} page={page} no new listings")
-            break
-        if new < 5 and page > 3:
-            log(f"  [STOP] {label} page={page} low activity")
-            break
-
-        time.sleep(0.05)
+        if page != 1:
+            time.sleep(0.05)
 
     return listings
+
+
+def _fetch_page(label, page, price_from, price_to):
+    url = search_url(page, price_from, price_to)
+    log(f"  [SEARCH] {url}")
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        return BeautifulSoup(r.text, "html.parser")
+    except Exception as e:
+        log(f"  [ERR] {label} page={page} -> {e}")
+        return None
+
+
+def _parse_total_count(soup) -> int | None:
+    """Extract the total listing count shown as 'X treff' on the search page."""
+    for tag in soup.find_all(["h1", "h2", "span", "p", "div"]):
+        text = tag.get_text(" ", strip=True)
+        m = re.search(r"([\d\s\xa0]+)\s*treff", text)
+        if m:
+            try:
+                return int(re.sub(r"\s", "", m.group(1)))
+            except ValueError:
+                pass
+    return None
 
 
 def _parse_article(article) -> tuple[str | None, str]:
