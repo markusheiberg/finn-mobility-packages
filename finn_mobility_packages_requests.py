@@ -184,26 +184,12 @@ def classify_dealer(finnkode: str, org_name: str) -> str:
 
 def _has_premium_link(soup: BeautifulSoup, page_text: str) -> bool:
     """
-    Premium dealers have a link to their own website or listing page.
-    Observed text variants:
+    Premium dealers have a specific link/button to their own site or listing.
+    Known text variants:
       - "Se annonsen på selgerens side"
       - "besøk nettsiden"
-    Also detected as any <a href> pointing to an external dealer domain
-    (not finn.no, brreg.no, or other utility sites).
     """
-    TEXT_SIGNALS = ["selgerens side", "besøk nettsiden"]
-    if any(sig in page_text for sig in TEXT_SIGNALS):
-        return True
-
-    # External link to dealer's own domain (e.g. dealer.porsche.com)
-    EXCLUDED = {"finn.no", "brreg.no", "finncdn.no", "maptiles", "schibsted",
-                "nxbf.no", "bilbransje", "google", "facebook", "instagram"}
-    for a in soup.find_all("a", href=True):
-        href = a["href"].lower()
-        if href.startswith("http") and not any(ex in href for ex in EXCLUDED):
-            return True
-
-    return False
+    return "selgerens side" in page_text or "besøk nettsiden" in page_text
 
 
 def _seller_has_logo(soup: BeautifulSoup) -> bool:
