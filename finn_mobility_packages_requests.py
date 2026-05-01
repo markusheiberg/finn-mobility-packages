@@ -184,12 +184,10 @@ def classify_dealer(finnkode: str, org_name: str) -> str:
 
 def _has_premium_link(soup: BeautifulSoup, page_text: str) -> bool:
     """
-    Premium dealers have a specific link/button to their own site or listing.
-    Known text variants:
-      - "Se annonsen på selgerens side"
-      - "besøk nettsiden"
+    Premium dealers have a 'Se annonsen på selgerens side' box below the dealer card.
+    'Besøk nettsiden' is a plain website link available to all dealers — not Premium.
     """
-    return "selgerens side" in page_text or "besøk nettsiden" in page_text
+    return "selgerens side" in page_text
 
 
 def _seller_has_logo(soup: BeautifulSoup) -> bool:
