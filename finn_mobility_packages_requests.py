@@ -116,6 +116,12 @@ def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
         if page != 1:
             time.sleep(0.05)
 
+    # Trim to target by random subsampling to remove within-page ordering bias
+    if len(listings) > target:
+        collected = len(listings)
+        listings = random.sample(listings, target)
+        log(f"  [TRIM] {label} sampled {target} from {collected}")
+
     return listings
 
 
