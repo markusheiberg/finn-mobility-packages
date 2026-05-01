@@ -227,15 +227,15 @@ def scrape_bucket(
 
 # ── Price buckets ─────────────────────────────────────────────────────────────
 
-def price_buckets(step: int = 25_000, upper: int = 2_000_000):
+def price_buckets(step: int = 10_000, upper: int = 1_000_000):
     """
-    Non-overlapping 25 000 NOK buckets.
+    Non-overlapping 10 000 NOK buckets up to 1 000 000, then one open-ended bucket.
 
     Bucket boundaries (examples):
-      0 – 25 000       → price_from=0,      price_to=25000
-      25 001 – 50 000  → price_from=25001,  price_to=50000
-      375 001 – 400 000→ price_from=375001, price_to=400000
-      2 000 001 +      → price_from=2000001 (no upper bound)
+      0 – 10 000        → price_from=0,       price_to=10000
+      10 001 – 20 000   → price_from=10001,   price_to=20000
+      990 001 – 1000 000→ price_from=990001,  price_to=1000000
+      1 000 001 +       → price_from=1000001  (no upper bound)
     """
     intervals = []
     start = 0
