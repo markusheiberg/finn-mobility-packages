@@ -334,5 +334,40 @@ def main():
     log(f"\nDealer cache final size: {len(_dealer_cache)}")
 
 
+def test_run(n=50):
+    """Fetch the first page of results (no price filter) and classify n listings."""
+    log(f"=== TEST RUN: classifying first {n} listings ===")
+    url = f"{SEARCH_URL}?dealer_segment=1&dealer_segment=2"
+    log(f"[SEARCH] {url}")
+    r = requests.get(url, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    listings = []
+    seen = set()
+    for art in soup.find_all("article"):
+        fk, org = _parse_article(art)
+        if fk and fk not in seen:
+            seen.add(fk)
+            listings.append((fk, org))
+        if len(listings) >= n:
+            break
+
+    log(f"Found {len(listings)} listings on page 1\n")
+
+    counts = {"premium": 0, "pluss": 0, "basis": 0}
+    for fk, org in listings:
+        pkg = classify_dealer(fk, org)
+        counts[pkg] += 1
+        log(f"  {fk:>12}  {pkg:<8}  {org}")
+
+    log(f"\nResult: Premium={counts['premium']}  Pluss={counts['pluss']}  Basis={counts['basis']}")
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--test":
+        n = int(sys.argv[2]) if len(sys.argv) > 2 else 50
+        test_run(n)
+    else:
+        main()
