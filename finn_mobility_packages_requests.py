@@ -5,7 +5,9 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from datetime import date
 
-BASE_URL = "https://www.finn.no/mobility/search/car"
+SEARCH_URL = "https://www.finn.no/mobility/search/car"
+AD_URL     = "https://www.finn.no/mobility/item/{finnkode}"
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) "
@@ -15,34 +17,24 @@ HEADERS = {
     "Accept-Language": "nb-NO,nb;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
-MAX_PAGES_PER_BUCKET = 50   # FINN caps search results at ~50 pages per filter
+MAX_PAGES_PER_BUCKET = 50
 OUTPUT_CSV = "finn_mobility_packages_summary.csv"
-DEBUG_CSV = "finn_mobility_debug.csv"
+DEBUG_CSV  = "finn_mobility_debug.csv"
 
-# ── Package tiers ─────────────────────────────────────────────────────────────
-# All dealer cards occupy the same grid cell. Differences are visual signals:
-#
-#   premium – highlighted border / badge  +  dealer logo  +  ≥3 images
-#   pluss   – dealer logo visible  OR  ≥2 car images
-#   basis   – single image, no logo
-#
-# NOTE: Run once with DEBUG_CSV and inspect card_classes / has_logo / img_count
-# to verify these rules against live HTML before trusting the summary counts.
-
-# Broad ad-link selector covering all finn.no mobility sub-categories
-AD_LINK_SEL = 'a[href*="/mobility/"][href*="finnkode="]'
-
-LOGO_ALT_RE  = re.compile(r"\b(logo|dealer|forhandler|brand|merke|logotype)\b", re.I)
-LOGO_CLS_RE  = re.compile(r"logo|dealer|brand|avatar|partner", re.I)
-LOGO_SRC_RE  = re.compile(r"logo|brand|icon|dealer", re.I)
-
-FEATURED_CLS_RE    = re.compile(r"topp|top[-_]?ad|featured|highlight|premium|gold|sponsored", re.I)
-FEATURED_TESTID_RE = re.compile(r"topp|featured|highlight|premium|top[-_]?ad", re.I)
+# Badge CSS classes confirmed from HTML inspection of known Basis/Pluss/Premium ads
+PREMIUM_BADGE_CLS = "bg-[--w-color-badge-warning-background]"   # amber/yellow
+PLUSS_BADGE_CLS   = "bg-[--w-color-badge-negative-background]"  # red
 
 
-# ── URL builder ───────────────────────────────────────────────────────────────
+# ── HTTP helpers ──────────────────────────────────────────────────────────────
 
-def build_url(page: int, price_from: int | None, price_to: int | None) -> str:
+def get(url: str) -> BeautifulSoup:
+    r = requests.get(url, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    return BeautifulSoup(r.text, "html.parser")
+
+
+def build_search_url(page: int, price_from: int | None, price_to: int | None) -> str:
     params = ["dealer_segment=2", "dealer_segment=1"]
     if price_from is not None:
         params.append(f"price_from={price_from}")
@@ -50,193 +42,96 @@ def build_url(page: int, price_from: int | None, price_to: int | None) -> str:
         params.append(f"price_to={price_to}")
     if page > 1:
         params.append(f"page={page}")
-    return f"{BASE_URL}?{'&'.join(params)}"
+    return f"{SEARCH_URL}?{'&'.join(params)}"
 
 
-def get_soup(page: int, price_from: int | None, price_to: int | None):
-    url = build_url(page, price_from, price_to)
-    print(f"\n[GET] {url}")
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    return BeautifulSoup(r.text, "html.parser"), r.url
+# ── Pass 1: collect finnkodes from search results ─────────────────────────────
 
-
-# ── Card classification helpers ───────────────────────────────────────────────
+AD_LINK_RE = re.compile(r"/mobility/(?:item|car/ad\.html)\?.*finnkode=(\d+)|/mobility/item/(\d+)")
 
 def extract_finnkode(href: str | None) -> str | None:
     if not href:
         return None
     m = re.search(r"finnkode=(\d+)", href)
+    if m:
+        return m.group(1)
+    m = re.search(r"/mobility/item/(\d+)", href)
     return m.group(1) if m else None
 
 
-def _is_logo_img(img) -> bool:
-    alt = (img.get("alt") or "").strip()
-    cls = " ".join(img.get("class") or [])
-    src = (img.get("src") or "").lower()
-    return (
-        LOGO_ALT_RE.search(alt) is not None
-        or LOGO_CLS_RE.search(cls) is not None
-        or LOGO_SRC_RE.search(src) is not None
-    )
-
-
-def _has_dealer_logo(card) -> bool:
-    # 1. Dedicated logo container via data-testid
-    for el in card.find_all(attrs={"data-testid": True}):
-        if re.search(r"logo|dealer[-_]?logo|brand[-_]?logo", el["data-testid"], re.I):
-            return True
-    # 2. Class-based logo container
-    for el in card.find_all(["div", "span", "figure", "a"]):
-        cls = " ".join(el.get("class") or [])
-        if LOGO_CLS_RE.search(cls) and el.find("img"):
-            return True
-    # 3. Direct logo img
-    for img in card.find_all("img"):
-        if _is_logo_img(img):
-            return True
-    return False
-
-
-def _count_car_images(card) -> int:
-    seen: set[str] = set()
-    count = 0
-    for img in card.find_all("img"):
-        if _is_logo_img(img):
-            continue
-        src = (img.get("src") or img.get("data-src") or "").strip()
-        if not src:
-            continue
-        try:
-            if int(img.get("width", 999)) < 40 or int(img.get("height", 999)) < 40:
-                continue
-        except (ValueError, TypeError):
-            pass
-        if src not in seen:
-            seen.add(src)
-            count += 1
-    return count
-
-
-def _is_featured(card) -> bool:
-    card_cls    = " ".join(card.get("class") or [])
-    card_testid = card.get("data-testid", "")
-    if FEATURED_CLS_RE.search(card_cls) or FEATURED_TESTID_RE.search(card_testid):
-        return True
-    for el in card.find_all(["span", "div", "p", "strong", "label", "li"]):
-        cls    = " ".join(el.get("class") or [])
-        testid = el.get("data-testid", "")
-        text   = (el.get_text() or "").strip()
-        if FEATURED_CLS_RE.search(cls) or FEATURED_TESTID_RE.search(testid):
-            return True
-        if re.fullmatch(r"topp", text, re.I):
-            return True
-    return False
-
-
-def classify_card(card) -> tuple[str | None, str, dict]:
-    link     = card.select_one(AD_LINK_SEL)
-    finnkode = extract_finnkode(link.get("href") if link else None)
-    has_logo = _has_dealer_logo(card)
-    img_count = _count_car_images(card)
-    featured  = _is_featured(card)
-
-    if featured:
-        package = "premium"
-    elif has_logo or img_count >= 2:
-        package = "pluss"
-    else:
-        package = "basis"
-
-    return finnkode, package, {
-        "finnkode":    finnkode,
-        "package":     package,
-        "img_count":   img_count,
-        "has_logo":    has_logo,
-        "is_featured": featured,
-        "card_classes": " ".join(card.get("class") or []),
-        "card_testid":  card.get("data-testid", ""),
-    }
-
-
-def get_listing_cards(soup: BeautifulSoup) -> list:
-    # Try progressively broader selectors
-    for sel in [
-        "article",
-        '[data-testid*="ad-list-item"]',
-        '[data-testid*="search-result"]',
-        '[data-testid*="listing"]',
-        'div[class*="search-result"]',
-    ]:
-        candidates = soup.select(sel)
-        cards = [c for c in candidates if c.select_one(AD_LINK_SEL)]
-        if cards:
-            return cards
-    return []
-
-
-# ── Bucket scraper ────────────────────────────────────────────────────────────
-
-def scrape_bucket(
+def get_finnkodes_for_bucket(
     price_from: int | None,
     price_to: int | None,
-    debug_rows: list,
-) -> dict:
-    counts = {"premium": 0, "pluss": 0, "basis": 0}
+) -> list[str]:
     seen: set[str] = set()
+    finnkodes: list[str] = []
 
     for page in range(1, MAX_PAGES_PER_BUCKET + 1):
+        url = build_search_url(page, price_from, price_to)
+        print(f"  [SEARCH] {url}")
         try:
-            soup, _ = get_soup(page, price_from, price_to)
+            soup = get(url)
         except Exception as e:
-            print(f"[ERR] bucket=({price_from},{price_to}) page={page} -> {e}")
+            print(f"  [ERR] {e}")
             break
 
-        cards = get_listing_cards(soup)
-        if not cards:
-            print(f"[STOP] bucket=({price_from},{price_to}) page={page}: no cards found")
+        # Grab every link pointing to a mobility ad
+        links = soup.find_all("a", href=lambda h: h and "/mobility/" in h)
+        new = 0
+        for link in links:
+            fk = extract_finnkode(link.get("href"))
+            if fk and fk not in seen:
+                seen.add(fk)
+                finnkodes.append(fk)
+                new += 1
+
+        print(f"  [SEARCH] page={page} new_ids={new} total={len(finnkodes)}")
+
+        if new == 0:
             break
-
-        new_rows = 0
-        for card in cards:
-            finnkode, package, debug = classify_card(card)
-            if not finnkode or finnkode in seen:
-                continue
-            seen.add(finnkode)
-            counts[package] += 1
-            new_rows += 1
-            debug_rows.append(debug)
-
-        print(
-            f"[PAGE]  bucket=({price_from},{price_to}) page={page} "
-            f"new={new_rows} "
-            f"(premium={counts['premium']}, pluss={counts['pluss']}, basis={counts['basis']})"
-        )
-
-        if new_rows == 0:
-            print(f"[STOP] no new rows, moving to next bucket")
-            break
-        if new_rows < 5 and page > 3:
-            print(f"[STOP] low activity ({new_rows} new), moving to next bucket")
+        if new < 5 and page > 3:
             break
 
         time.sleep(0.3)
 
-    return counts
+    return finnkodes
+
+
+# ── Pass 2: classify each ad by visiting its page ────────────────────────────
+
+def classify_ad(finnkode: str) -> tuple[str, dict]:
+    url = AD_URL.format(finnkode=finnkode)
+    try:
+        soup = get(url)
+    except Exception as e:
+        print(f"  [ERR] {finnkode}: {e}")
+        return "error", {"finnkode": finnkode, "package": "error", "error": str(e)}
+
+    # Check every element's class list for the badge classes
+    all_classes: set[str] = set()
+    for el in soup.find_all(True):
+        for cls in el.get("class") or []:
+            all_classes.add(cls)
+
+    if PREMIUM_BADGE_CLS in all_classes:
+        package = "premium"
+    elif PLUSS_BADGE_CLS in all_classes:
+        package = "pluss"
+    else:
+        package = "basis"
+
+    debug = {
+        "finnkode":         finnkode,
+        "package":          package,
+        "has_premium_badge": PREMIUM_BADGE_CLS in all_classes,
+        "has_pluss_badge":   PLUSS_BADGE_CLS in all_classes,
+    }
+    return package, debug
 
 
 # ── Price buckets ─────────────────────────────────────────────────────────────
 
 def price_buckets(step: int = 10_000, upper: int = 1_000_000):
-    """
-    Non-overlapping 10 000 NOK buckets up to 1 000 000, then one open-ended bucket.
-
-    Bucket boundaries (examples):
-      0 – 10 000        → price_from=0,       price_to=10000
-      10 001 – 20 000   → price_from=10001,   price_to=20000
-      990 001 – 1000 000→ price_from=990001,  price_to=1000000
-      1 000 001 +       → price_from=1000001  (no upper bound)
-    """
     intervals = []
     start = 0
     while start < upper:
@@ -244,7 +139,7 @@ def price_buckets(step: int = 10_000, upper: int = 1_000_000):
         p_from = 0 if start == 0 else start + 1
         intervals.append((p_from, end))
         start = end
-    intervals.append((upper + 1, None))   # open-ended top bucket
+    intervals.append((upper + 1, None))
     return intervals
 
 
@@ -252,51 +147,66 @@ def bucket_label(p_from: int | None, p_to: int | None) -> str:
     return f"{p_from}-plus" if p_to is None else f"{p_from}-{p_to}"
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     today_str = date.today().isoformat()
-    buckets = price_buckets()
-    summary_rows: list[dict] = []
-    debug_rows:   list[dict] = []
+    buckets   = price_buckets()
 
-    print(f"Starting scrape: {len(buckets)} price buckets, step=10 000 NOK")
+    # ── Pass 1: collect all finnkodes per bucket ──────────────────────────────
+    print(f"=== PASS 1: collecting finnkodes ({len(buckets)} buckets) ===\n")
+    bucket_finnkodes: dict[str, list[str]] = {}
 
-    for idx, (p_from, p_to) in enumerate(buckets, start=1):
+    for idx, (p_from, p_to) in enumerate(buckets, 1):
         label = bucket_label(p_from, p_to)
-        print(f"\n{'='*60}")
-        print(f"BUCKET {idx}/{len(buckets)}: {label}")
-        print(f"{'='*60}")
-
-        counts = scrape_bucket(p_from, p_to, debug_rows)
-
-        summary_rows.append({
-            "date_collected":  today_str,
-            "price_bracket":   label,
-            "premium_count":   counts["premium"],
-            "pluss_count":     counts["pluss"],
-            "basis_count":     counts["basis"],
-        })
-
+        print(f"\n[BUCKET {idx}/{len(buckets)}] {label}")
+        fks = get_finnkodes_for_bucket(p_from, p_to)
+        bucket_finnkodes[label] = fks
+        print(f"  → {len(fks)} ads found")
         time.sleep(0.5)
 
-    # ── Summary CSV ───────────────────────────────────────────────────────────
+    all_finnkodes = list({fk for fks in bucket_finnkodes.values() for fk in fks})
+    print(f"\nPass 1 done. {len(all_finnkodes)} unique finnkodes across all buckets.")
+
+    # ── Pass 2: classify each unique ad ──────────────────────────────────────
+    print(f"\n=== PASS 2: classifying {len(all_finnkodes)} ads ===\n")
+    classification: dict[str, str] = {}
+    debug_rows: list[dict]         = []
+
+    for i, fk in enumerate(all_finnkodes, 1):
+        package, debug = classify_ad(fk)
+        classification[fk] = package
+        debug_rows.append(debug)
+
+        if i % 50 == 0 or i == len(all_finnkodes):
+            dist = pd.Series(classification.values()).value_counts().to_dict()
+            print(f"  [{i}/{len(all_finnkodes)}] {dist}")
+
+        time.sleep(0.3)
+
+    # ── Aggregate per bucket ──────────────────────────────────────────────────
+    summary_rows = []
+    for label, fks in bucket_finnkodes.items():
+        counts = {"premium": 0, "pluss": 0, "basis": 0, "error": 0}
+        for fk in fks:
+            pkg = classification.get(fk, "error")
+            counts[pkg] = counts.get(pkg, 0) + 1
+        summary_rows.append({
+            "date_collected": today_str,
+            "price_bracket":  label,
+            "premium_count":  counts["premium"],
+            "pluss_count":    counts["pluss"],
+            "basis_count":    counts["basis"],
+        })
+
     df = pd.DataFrame(summary_rows)
     df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
-    print(f"\n[CSV] Wrote {len(df)} rows → {OUTPUT_CSV}")
-    print(df.to_string())
+    print(f"\n[CSV] {len(df)} rows → {OUTPUT_CSV}")
+    print(df[df[["premium_count","pluss_count","basis_count"]].sum(axis=1) > 0].to_string())
 
-    # ── Debug CSV (for tuning classification on first run) ────────────────────
     if debug_rows:
-        df_debug = pd.DataFrame(debug_rows)
-        df_debug.to_csv(DEBUG_CSV, index=False, encoding="utf-8-sig")
-        print(f"\n[DEBUG CSV] Wrote {len(df_debug)} rows → {DEBUG_CSV}")
-        print("\nPackage distribution:")
-        print(df_debug["package"].value_counts().to_string())
-        print("\nSample with has_logo=True:")
-        print(df_debug[df_debug["has_logo"]].head(5).to_string())
-        print("\nSample card_classes (first 10 unique):")
-        print(df_debug["card_classes"].drop_duplicates().head(10).to_string())
+        pd.DataFrame(debug_rows).to_csv(DEBUG_CSV, index=False, encoding="utf-8-sig")
+        print(f"[DEBUG CSV] → {DEBUG_CSV}")
 
 
 if __name__ == "__main__":
