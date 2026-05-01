@@ -183,38 +183,23 @@ def classify_dealer(finnkode: str, org_name: str) -> str:
 
 def _seller_has_logo(soup: BeautifulSoup) -> bool:
     """
-    Return True if the seller/dealer info box on the ad page contains a logo image.
-
-    Premium and Pluss dealers show their company logo (Toyota, SULLAND, etc.)
-    in the seller info card. Basis dealers show only bold text (no img).
+    Pluss and Premium dealers have their company logo hosted on dealerhub.cdn-vend.com.
+    Basis dealers have no such image — only a bold text company name.
+    Confirmed from live pages: both Pluss and Premium have dealerhub logos;
+    Basis does not.
     """
-    # Try specific seller-section selectors first
-    seller_selectors = [
-        '[data-testid*="seller"]',
-        '[data-testid*="contact"]',
-        '[class*="seller-info"]',
-        '[class*="sellerInfo"]',
-        '[class*="contact-info"]',
-        '[class*="dealer-info"]',
-    ]
-    for sel in seller_selectors:
-        section = soup.select_one(sel)
-        if section:
-            return _has_non_icon_img(section)
-
-    # Fallback: find the card that contains "Skriv til selger" or "org.nr"
-    # and check for imgs nearby
-    for section in soup.select("section, aside, div"):
-        text = section.get_text(" ", strip=True).lower()
-        if "org.nr" in text or "skriv til selger" in text or "brreg" in text:
-            if _has_non_icon_img(section):
-                return True
-
+    for img in soup.find_all("img"):
+        src = (img.get("src") or "").lower()
+        if "dealerhub.cdn-vend.com" in src:
+            return True
+        # Some dealers may use finn's own profile CDN (exclude the NBF badge)
+        if "mobility-company-profile" in src and "nbf" not in src:
+            return True
     return False
 
 
 def _has_non_icon_img(element) -> bool:
-    """True if element contains an <img> that isn't a tiny icon or NXBF badge."""
+    """Unused — kept for reference."""
     for img in element.find_all("img"):
         src = (img.get("src") or "").lower()
         alt = (img.get("alt") or "").lower()
