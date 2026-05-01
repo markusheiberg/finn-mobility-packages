@@ -92,7 +92,7 @@ def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
             log(f"  [STOP] {label} page={page} low activity")
             break
 
-        time.sleep(0.3)
+        time.sleep(0.05)
 
     return listings
 
@@ -178,7 +178,7 @@ def classify_dealer(finnkode: str, org_name: str) -> str:
     if org_name:
         _dealer_cache[org_name] = package
 
-    time.sleep(0.2)
+    time.sleep(0.05)
     return package
 
 
@@ -334,7 +334,7 @@ def main():
             "total_count": sum(counts.values()),
         })
 
-        time.sleep(0.5)
+        time.sleep(0.1)
 
     df = pd.DataFrame(summary_rows)
     df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
