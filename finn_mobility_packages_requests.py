@@ -136,8 +136,8 @@ def _parse_article(article) -> tuple[str | None, str]:
 def classify_dealer(finnkode: str, org_name: str) -> str:
     """
     Fetch the individual ad page and determine package:
-      premium  = logo img present  AND  "se annonsen på selgerens side"
-      pluss    = logo img present  AND  no "se annonsen"
+      premium  = logo img present  AND  own inventory via recommendations API
+      pluss    = logo img present  AND  no own inventory
       basis    = no logo img in seller section
     Result is cached by org_name so each dealer is fetched only once.
     """
@@ -158,21 +158,17 @@ def classify_dealer(finnkode: str, org_name: str) -> str:
             _dealer_cache[org_name] = package
         return package
 
-    raw_html = r.text
-    soup = BeautifulSoup(raw_html, "html.parser")
+    soup = BeautifulSoup(r.text, "html.parser")
 
-    # Signal 1: Premium = "Se annonsen på selgerens side" button with rel=sponsored.
-    # The button is JS-rendered so BeautifulSoup won't find it via get_text(),
-    # but rel="sponsored" IS present as a raw string in the static HTML.
-    has_premium_link = _has_premium_link(raw_html)
-
-    # Signal 2: dealerhub logo img → Pluss or Premium
+    # Signal 1: dealerhub logo img → Pluss or Premium (not Basis)
     has_logo = _seller_has_logo(soup)
 
-    if has_premium_link:
-        package = "premium"
-    elif has_logo:
-        package = "pluss"
+    if has_logo:
+        # Signal 2: Premium dealers have their own inventory at the bottom.
+        # The Aurora recommendations podlet fetches this via an API endpoint.
+        # We call it directly; a non-empty response means Premium.
+        has_inventory = _check_inventory_api(finnkode)
+        package = "premium" if has_inventory else "pluss"
     else:
         package = "basis"
 
@@ -183,20 +179,38 @@ def classify_dealer(finnkode: str, org_name: str) -> str:
     return package
 
 
-def _has_premium_link(raw_html: str) -> bool:
+def _check_inventory_api(finnkode: str) -> bool:
     """
-    Premium dealers are identified by static HTML signals:
-      - "Flere annonser fra oss" section at the bottom (own inventory)
-      - "butikkside med" in link text (vs "butikkside på FINN" for Pluss/Basis)
-      - rel="sponsored" on the external link (fallback, may be JS-rendered)
+    Call the Aurora recommendations proxy to check if this dealer has own inventory.
+    Premium dealers return items; Pluss dealers return empty/no results.
+    The endpoint is the same one the JS podlet uses client-side.
     """
-    lower = raw_html.lower()
-    return (
-        "flere annonser fra oss" in lower
-        or "butikkside med" in lower
-        or 'rel="sponsored"' in lower
-        or "rel='sponsored'" in lower
-    )
+    url = "https://www.finn.no/mobility/item/podium-resource/recommendations"
+    headers = {
+        **HEADERS,
+        "Referer": f"https://www.finn.no/mobility/item/{finnkode}",
+        "Origin": "https://www.finn.no",
+        "Accept": "application/json, */*",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    params = {"adId": finnkode, "type": "inventory"}
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=15)
+        if r.status_code != 200:
+            log(f"      [INV-API] {r.status_code} for {finnkode}")
+            return False
+        data = r.json()
+        # Response shape varies; check common envelope keys first
+        for key in ("items", "results", "ads", "data", "documents"):
+            val = data.get(key)
+            if val:
+                return True
+        # Top-level list
+        if isinstance(data, list) and data:
+            return True
+    except Exception as e:
+        log(f"      [INV-API-ERR] {e}")
+    return False
 
 
 def _seller_has_logo(soup: BeautifulSoup) -> bool:
@@ -213,31 +227,6 @@ def _seller_has_logo(soup: BeautifulSoup) -> bool:
         # Some dealers may use finn's own profile CDN (exclude the NBF badge)
         if "mobility-company-profile" in src and "nbf" not in src:
             return True
-    return False
-
-
-def _has_non_icon_img(element) -> bool:
-    """Unused — kept for reference."""
-    for img in element.find_all("img"):
-        src = (img.get("src") or "").lower()
-        alt = (img.get("alt") or "").lower()
-
-        # Skip NXBF / Norges Bilbransjeforbund badge
-        if "nxbf" in src or "nxbf" in alt or "bilbransje" in alt:
-            continue
-        # Skip map thumbnails
-        if "staticmap" in src or "maptile" in src:
-            continue
-        # Skip tiny icons by size attribute
-        try:
-            w = int(img.get("width") or 0)
-            h = int(img.get("height") or 0)
-            if (w and w < 40) or (h and h < 40):
-                continue
-        except (ValueError, TypeError):
-            pass
-
-        return True
     return False
 
 
