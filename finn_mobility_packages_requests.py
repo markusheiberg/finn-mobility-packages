@@ -184,9 +184,17 @@ def classify_dealer(finnkode: str, org_name: str) -> str:
 
 def _has_premium_link(soup: BeautifulSoup, page_text: str) -> bool:
     """
-    Premium dealers have a 'Se annonsen på selgerens side' box below the dealer card.
-    'Besøk nettsiden' is a plain website link available to all dealers — not Premium.
+    Premium dealers have a 'Se annonsen på selgerens side' button below the dealer card.
+    The button text is JS-rendered so get_text() won't find it, but the underlying
+    <a> element has rel="noopener sponsored" which IS in the static HTML.
+    Example: <a href="https://dealer.porsche.com/..." rel="noopener sponsored">
     """
+    for a in soup.find_all("a", href=True):
+        rel = " ".join(a.get("rel") or []).lower()
+        href = a["href"]
+        if "sponsored" in rel and href.startswith("http") and "finn.no" not in href:
+            return True
+    # Fallback: text-based check in case it ever renders server-side
     return "selgerens side" in page_text
 
 
