@@ -158,12 +158,13 @@ def classify_dealer(finnkode: str, org_name: str) -> str:
             _dealer_cache[org_name] = package
         return package
 
-    soup = BeautifulSoup(r.text, "html.parser")
-    page_text = soup.get_text(" ", strip=True).lower()
+    raw_html = r.text
+    soup = BeautifulSoup(raw_html, "html.parser")
 
-    # Signal 1: external dealer website link → Premium
-    # Seen variants: "Se annonsen på selgerens side", "besøk nettsiden"
-    has_premium_link = _has_premium_link(soup, page_text)
+    # Signal 1: Premium = "Se annonsen på selgerens side" button with rel=sponsored.
+    # The button is JS-rendered so BeautifulSoup won't find it via get_text(),
+    # but rel="sponsored" IS present as a raw string in the static HTML.
+    has_premium_link = _has_premium_link(raw_html)
 
     # Signal 2: dealerhub logo img → Pluss or Premium
     has_logo = _seller_has_logo(soup)
@@ -182,20 +183,13 @@ def classify_dealer(finnkode: str, org_name: str) -> str:
     return package
 
 
-def _has_premium_link(soup: BeautifulSoup, page_text: str) -> bool:
+def _has_premium_link(raw_html: str) -> bool:
     """
-    Premium dealers have a 'Se annonsen på selgerens side' button below the dealer card.
-    The button text is JS-rendered so get_text() won't find it, but the underlying
-    <a> element has rel="noopener sponsored" which IS in the static HTML.
-    Example: <a href="https://dealer.porsche.com/..." rel="noopener sponsored">
+    Premium dealers have a 'Se annonsen på selgerens side' button whose <a> element
+    carries rel="sponsored". The button text is JS-rendered but rel="sponsored"
+    is present as a raw string in the static HTML response — search directly.
     """
-    for a in soup.find_all("a", href=True):
-        rel = " ".join(a.get("rel") or []).lower()
-        href = a["href"]
-        if "sponsored" in rel and href.startswith("http") and "finn.no" not in href:
-            return True
-    # Fallback: text-based check in case it ever renders server-side
-    return "selgerens side" in page_text
+    return 'rel="sponsored"' in raw_html or "rel='sponsored'" in raw_html
 
 
 def _seller_has_logo(soup: BeautifulSoup) -> bool:
