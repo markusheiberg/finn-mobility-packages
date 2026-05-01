@@ -158,16 +158,16 @@ def classify_dealer(finnkode: str, org_name: str) -> str:
             _dealer_cache[org_name] = package
         return package
 
-    soup = BeautifulSoup(r.text, "html.parser")
+    raw_html = r.text
+    soup = BeautifulSoup(raw_html, "html.parser")
 
     # Signal 1: dealerhub logo img → Pluss or Premium (not Basis)
     has_logo = _seller_has_logo(soup)
 
     if has_logo:
-        # Signal 2: Premium dealers have their own inventory at the bottom.
-        # The Aurora recommendations podlet fetches this via an API endpoint.
-        # We call it directly; a non-empty response means Premium.
-        has_inventory = _check_inventory_api(finnkode)
+        # Signal 2: Premium dealers have an inventory podlet with type="inventory"
+        # in its externalprops attribute — present in static HTML, absent on Pluss.
+        has_inventory = '"type":"inventory"' in raw_html
         package = "premium" if has_inventory else "pluss"
     else:
         package = "basis"
@@ -178,39 +178,6 @@ def classify_dealer(finnkode: str, org_name: str) -> str:
     time.sleep(0.05)
     return package
 
-
-def _check_inventory_api(finnkode: str) -> bool:
-    """
-    Call the Aurora recommendations proxy to check if this dealer has own inventory.
-    Premium dealers return items; Pluss dealers return empty/no results.
-    The endpoint is the same one the JS podlet uses client-side.
-    """
-    url = "https://www.finn.no/mobility/item/podium-resource/recommendations"
-    headers = {
-        **HEADERS,
-        "Referer": f"https://www.finn.no/mobility/item/{finnkode}",
-        "Origin": "https://www.finn.no",
-        "Accept": "application/json, */*",
-        "X-Requested-With": "XMLHttpRequest",
-    }
-    params = {"adId": finnkode, "type": "inventory"}
-    try:
-        r = requests.get(url, headers=headers, params=params, timeout=15)
-        log(f"      [INV-API] status={r.status_code} finnkode={finnkode}")
-        if r.status_code != 200:
-            return False
-        raw = r.text[:500]
-        log(f"      [INV-API] body={raw!r}")
-        data = r.json()
-        for key in ("items", "results", "ads", "data", "documents"):
-            val = data.get(key)
-            if val:
-                return True
-        if isinstance(data, list) and data:
-            return True
-    except Exception as e:
-        log(f"      [INV-API-ERR] {e}")
-    return False
 
 
 def _seller_has_logo(soup: BeautifulSoup) -> bool:
