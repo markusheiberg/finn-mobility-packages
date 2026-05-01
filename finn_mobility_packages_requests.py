@@ -1,13 +1,16 @@
+import base64
 import json
 import re
-import sys
 import time
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 from datetime import date
 
-BASE_URL = "https://www.finn.no/mobility/search/car"
+SEARCH_PAGE_URL = "https://www.finn.no/mobility/search/car"
+SEARCH_API_URL = "https://www.finn.no/mobility/search/api"
+SEARCH_KEY = "SEARCH_ID_CAR_USED"
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) "
@@ -15,6 +18,7 @@ HEADERS = {
         "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "nb-NO,nb;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept": "application/json, text/html, */*",
 }
 
 MAX_PAGES_PER_BUCKET = 200
@@ -22,362 +26,322 @@ OUTPUT_CSV = "finn_mobility_packages_summary.csv"
 DEBUG_CSV = "finn_mobility_debug.csv"
 
 
-def log(*args, **kwargs):
-    print(*args, **kwargs, flush=True)
+def log(*args):
+    print(*args, flush=True)
 
 
-def build_url(page: int, price_from: int | None, price_to: int | None) -> str:
-    params = ["dealer_segment=1", "dealer_segment=2"]
+# ---------------------------------------------------------------------------
+# URL builders
+# ---------------------------------------------------------------------------
+
+def _common_params(price_from, price_to, page):
+    params = [("dealer_segment", "1"), ("dealer_segment", "2")]
     if price_from is not None:
-        params.append(f"price_from={price_from}")
+        params.append(("price_from", str(price_from)))
     if price_to is not None:
-        params.append(f"price_to={price_to}")
+        params.append(("price_to", str(price_to)))
     if page > 1:
-        params.append(f"page={page}")
-    return f"{BASE_URL}?{'&'.join(params)}"
+        params.append(("page", str(page)))
+    return params
 
 
-def get_page(page: int, price_from: int | None, price_to: int | None) -> tuple[BeautifulSoup, str]:
-    url = build_url(page, price_from, price_to)
-    log(f"[GET] {url}")
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    return BeautifulSoup(r.text, "html.parser"), url
+def html_url(page, price_from, price_to):
+    params = _common_params(price_from, price_to, page)
+    qs = "&".join(f"{k}={v}" for k, v in params)
+    return f"{SEARCH_PAGE_URL}?{qs}"
+
+
+def api_url(page, price_from, price_to):
+    params = [("searchKey", SEARCH_KEY)] + _common_params(price_from, price_to, page)
+    qs = "&".join(f"{k}={v}" for k, v in params)
+    return f"{SEARCH_API_URL}?{qs}"
 
 
 # ---------------------------------------------------------------------------
-# Primary path: extract listings from __NEXT_DATA__ JSON
+# Primary path: JSON API
 # ---------------------------------------------------------------------------
 
-def extract_next_data(soup: BeautifulSoup) -> dict | None:
-    tag = soup.find("script", {"id": "__NEXT_DATA__"})
-    if not tag:
-        return None
+def fetch_api(page, price_from, price_to):
+    """
+    Try the JSON search API. Returns list of result dicts, or None on failure.
+    Each dict has keys: finnkode, is_featured, has_logo, img_count, source.
+    """
+    url = api_url(page, price_from, price_to)
+    log(f"[API] {url}")
     try:
-        return json.loads(tag.string)
-    except (json.JSONDecodeError, TypeError):
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+    except Exception:
         return None
 
-
-def dig(obj, *keys):
-    """Safely traverse nested dicts/lists."""
-    for k in keys:
-        if obj is None:
-            return None
-        if isinstance(obj, dict):
-            obj = obj.get(k)
-        elif isinstance(obj, list) and isinstance(k, int):
-            obj = obj[k] if k < len(obj) else None
-        else:
-            return None
-    return obj
-
-
-def find_docs(data: dict) -> list[dict]:
-    """
-    Try known paths for the listing array inside __NEXT_DATA__.
-    finn.no tends to nest under props -> pageProps -> initialProps / data / search.
-    """
-    candidates = [
-        dig(data, "props", "pageProps", "initialProps", "searchResult", "docs"),
-        dig(data, "props", "pageProps", "data", "searchResult", "docs"),
-        dig(data, "props", "pageProps", "searchResult", "docs"),
-        dig(data, "props", "pageProps", "data", "docs"),
-        dig(data, "props", "pageProps", "results"),
-        dig(data, "props", "pageProps", "ads"),
-    ]
-    for c in candidates:
-        if isinstance(c, list) and c:
-            return c
-
-    # deep search: walk the whole tree looking for a list that contains dicts
-    # with a "finnkode" or "id" key that looks like an ad
-    return _deep_find_docs(data)
-
-
-def _deep_find_docs(obj, depth=0) -> list[dict]:
-    if depth > 8:
-        return []
-    if isinstance(obj, list) and obj and isinstance(obj[0], dict):
-        keys = set(obj[0].keys())
-        if keys & {"finnkode", "ad_id", "adId", "id"}:
-            return obj
-    if isinstance(obj, dict):
-        for v in obj.values():
-            result = _deep_find_docs(v, depth + 1)
-            if result:
-                return result
-    if isinstance(obj, list):
-        for item in obj:
-            result = _deep_find_docs(item, depth + 1)
-            if result:
-                return result
-    return []
-
-
-FEATURED_KEYWORDS = {"topp", "premium", "featured", "highlight", "fremhevet", "sponsored"}
-
-
-def classify_doc(doc: dict) -> tuple[str, str, dict]:
-    """
-    Classify a listing doc from __NEXT_DATA__ JSON.
-    Returns (finnkode, package, debug_dict).
-    """
-    finnkode = str(
-        doc.get("finnkode")
-        or doc.get("ad_id")
-        or doc.get("adId")
-        or doc.get("id")
-        or ""
-    )
-
-    # --- featured / premium signal ---
-    flags = doc.get("flags", []) or []
-    labels = doc.get("labels", []) or []
-    ad_type = str(doc.get("ad_type") or doc.get("adType") or "").lower()
-    highlights = doc.get("highlights", []) or []
-
-    flag_text = " ".join(str(f).lower() for f in flags + labels + highlights)
-    is_featured = (
-        bool(FEATURED_KEYWORDS & set(flag_text.split()))
-        or any(kw in flag_text for kw in FEATURED_KEYWORDS)
-        or any(kw in ad_type for kw in FEATURED_KEYWORDS)
-    )
-
-    # --- dealer logo signal ---
-    dealer = doc.get("dealer") or doc.get("company") or doc.get("organisation") or {}
-    logo_url = (
-        dealer.get("logo")
-        or dealer.get("logo_url")
-        or dealer.get("logoUrl")
-        or dealer.get("image")
-        or doc.get("dealer_logo")
-        or doc.get("dealerLogo")
-        or ""
-    )
-    has_logo = bool(logo_url)
-
-    # --- image count signal ---
-    images = (
-        doc.get("images")
-        or doc.get("image_urls")
-        or doc.get("imageUrls")
-        or doc.get("media")
+    # finn.no API may return docs at different paths
+    docs = (
+        data.get("docs")
+        or data.get("results")
+        or data.get("ads")
         or []
     )
-    if isinstance(images, dict):
-        images = list(images.values())
-    img_count = len(images) if isinstance(images, list) else 0
+    if not docs:
+        return None
 
-    # --- classify ---
-    if is_featured:
-        package = "premium"
-    elif has_logo or img_count >= 2:
-        package = "pluss"
-    else:
-        package = "basis"
+    rows = []
+    for doc in docs:
+        rows.append(_classify_api_doc(doc))
+    return rows
 
-    debug = {
+
+def _classify_api_doc(doc):
+    ad = doc.get("searchEntry") or doc
+    finnkode = str(
+        ad.get("id") or ad.get("ad_id") or ad.get("adId") or ad.get("finnkode") or ""
+    )
+
+    # Premium: labels list contains a "promotion" label
+    labels = ad.get("labels") or doc.get("labels") or []
+    label_texts = " ".join(
+        (lbl.get("text") if isinstance(lbl, dict) else str(lbl)).lower()
+        for lbl in labels
+    )
+    is_featured = "betalt plassering" in label_texts or "promotion" in label_texts
+
+    # Pluss: organisation has a logo url (field varies)
+    logo = (
+        ad.get("logo_url") or ad.get("logoUrl")
+        or ad.get("dealer_logo") or ad.get("dealerLogo")
+        or (ad.get("dealer") or {}).get("logo")
+        or (ad.get("organisation") or {}).get("logo")
+        or ""
+    )
+    has_logo = bool(logo)
+
+    # Image count
+    images = ad.get("images") or ad.get("image_urls") or []
+    img_count = len(images) if isinstance(images, list) else (1 if ad.get("image") else 0)
+
+    package = _package(is_featured, has_logo, img_count)
+
+    return {
         "finnkode": finnkode,
         "package": package,
         "is_featured": is_featured,
         "has_logo": has_logo,
-        "logo_url": str(logo_url)[:80],
         "img_count": img_count,
-        "flags": str(flags)[:80],
-        "ad_type": ad_type[:40],
+        "logo_url": str(logo)[:80],
+        "source": "api",
     }
-    return finnkode, package, debug
 
 
 # ---------------------------------------------------------------------------
-# Fallback path: parse HTML cards
+# Fallback path: HTML parsing via React Query dehydrated state + article tags
 # ---------------------------------------------------------------------------
 
-def classify_html_card(card) -> tuple[str | None, str, dict]:
-    link = card.select_one('a[href*="/mobility/"], a[href*="finnkode="]')
-    href = link.get("href") if link else None
-    finnkode = _extract_finnkode(href)
+def fetch_html(page, price_from, price_to):
+    """
+    Fetch the HTML page, extract listing data via:
+    1. Dehydrated React Query state (base64 blobs)
+    2. <article> tag parsing
+    Returns list of result dicts, or None if nothing found.
+    """
+    url = html_url(page, price_from, price_to)
+    log(f"[HTML] {url}")
+    r = requests.get(url, headers={**HEADERS, "Accept": "text/html"}, timeout=30)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
 
-    card_classes = " ".join(card.get("class") or []).lower()
-    card_testid = card.get("data-testid", "").lower()
+    # Try dehydrated React Query state first (richest data)
+    rows = _extract_dehydrated(soup)
+    if rows:
+        return rows
 
-    is_featured = False
-    for sel in ['[class*="badge"]', '[class*="featured"]', '[class*="premium"]',
-                '[data-testid*="badge"]', '[data-testid*="featured"]', "mark"]:
-        el = card.select_one(sel)
-        if el and any(kw in el.get_text(" ", strip=True).lower() for kw in FEATURED_KEYWORDS):
-            is_featured = True
-            break
-    if not is_featured:
-        if any(kw in card_classes + card_testid for kw in FEATURED_KEYWORDS):
-            is_featured = True
+    # Fall back to article tag parsing
+    return _extract_articles(soup) or None
 
-    has_logo = False
-    for sel in ['[data-testid*="logo"]', '[class*="dealer-logo"]', '[class*="dealerLogo"]',
-                '[class*="brand-logo"]', '[class*="brandLogo"]']:
-        if card.select_one(sel):
-            has_logo = True
-            break
-    if not has_logo:
-        for img in card.select("img"):
-            combined = (img.get("src") or "") + (img.get("alt") or "") + " ".join(img.get("class") or [])
-            if any(kw in combined.lower() for kw in ["logo", "dealer", "brand"]):
-                has_logo = True
-                break
 
-    SKIP = {"logo", "dealer", "brand", "icon", "avatar"}
-    seen: set[str] = set()
-    img_count = 0
-    for img in card.select("img"):
-        src = (img.get("src") or "").strip()
-        if not src or src in seen:
-            continue
-        combined = (img.get("alt") or "") + " ".join(img.get("class") or [])
-        if any(kw in combined.lower() for kw in SKIP):
+def _extract_dehydrated(soup):
+    """
+    Decode base64 script blobs and look for React Query dehydrated state
+    containing search results with labels.
+    """
+    rows = []
+    for script in soup.find_all("script", src=False):
+        txt = (script.string or "").strip()
+        if not txt.startswith("ey"):
             continue
         try:
-            w, h = int(img.get("width") or 0), int(img.get("height") or 0)
-            if (w and w < 40) or (h and h < 40):
+            decoded = base64.b64decode(txt + "==").decode("utf-8")
+            data = json.loads(decoded)
+        except Exception:
+            continue
+
+        # Look for queries array (React Query dehydrated state)
+        queries = data.get("queries")
+        if not isinstance(queries, list):
+            continue
+
+        for q in queries:
+            results = _dig(q, "state", "data", "results")
+            if not isinstance(results, list) or not results:
                 continue
-        except (ValueError, TypeError):
-            pass
-        seen.add(src)
-        img_count += 1
+            for item in results:
+                row = _classify_dehydrated_item(item)
+                if row and row["finnkode"]:
+                    rows.append(row)
 
-    if is_featured:
-        package = "premium"
-    elif has_logo or img_count >= 2:
-        package = "pluss"
-    else:
-        package = "basis"
+    return rows if rows else None
 
-    debug = {
+
+def _classify_dehydrated_item(item):
+    ad = item.get("searchEntry") or item
+    finnkode = str(
+        ad.get("id") or ad.get("ad_id") or ad.get("finnkode") or ""
+    )
+
+    labels = ad.get("labels") or item.get("labels") or []
+    label_texts = " ".join(
+        (lbl.get("text") if isinstance(lbl, dict) else str(lbl)).lower()
+        for lbl in labels
+    )
+    is_featured = "betalt plassering" in label_texts
+
+    logo = (
+        ad.get("logo_url") or ad.get("logoUrl") or ad.get("dealer_logo") or ""
+    )
+    has_logo = bool(logo)
+
+    images = ad.get("images") or []
+    img_count = len(images) if isinstance(images, list) else (1 if ad.get("image") else 0)
+
+    package = _package(is_featured, has_logo, img_count)
+
+    return {
         "finnkode": finnkode,
         "package": package,
         "is_featured": is_featured,
         "has_logo": has_logo,
         "img_count": img_count,
-        "card_classes": card_classes[:120],
-        "card_testid": card_testid[:80],
+        "logo_url": str(logo)[:80],
+        "source": "dehydrated",
     }
-    return finnkode, package, debug
 
 
-def get_html_cards(soup: BeautifulSoup) -> list:
-    AD_PATTERNS = [
-        'a[href*="/mobility/car/ad"]',
-        'a[href*="/mobility/"]',
-        'a[href*="finnkode="]',
-    ]
-    for container_sel in ["article", '[data-testid*="ad-list-item"]',
-                           '[data-testid*="search-result"]', 'li[class*="result"]']:
-        candidates = soup.select(container_sel)
-        if not candidates:
-            continue
-        for pattern in AD_PATTERNS:
-            cards = [c for c in candidates if c.select_one(pattern)]
-            if cards:
-                return cards
-    return []
+def _extract_articles(soup):
+    """Parse <article> tags directly from HTML."""
+    rows = []
+    for article in soup.find_all("article"):
+        row = _classify_article(article)
+        if row and row["finnkode"]:
+            rows.append(row)
+    return rows if rows else None
 
 
-def _extract_finnkode(href: str | None) -> str | None:
-    if not href:
+def _classify_article(article):
+    # Finnkode: <a id="461145507" href="/mobility/item/461145507">
+    link = article.select_one('a[href*="/mobility/item/"]')
+    finnkode = None
+    if link:
+        finnkode = link.get("id") or None
+        if not finnkode:
+            m = re.search(r"/mobility/item/(\d+)", link.get("href", ""))
+            finnkode = m.group(1) if m else None
+
+    if not finnkode:
         return None
-    m = re.search(r"finnkode=(\d+)", href)
-    if m:
-        return m.group(1)
-    m = re.search(r"/(\d{7,})", href)
-    return m.group(1) if m else None
 
+    card_text = article.get_text(" ", strip=True).lower()
 
-# ---------------------------------------------------------------------------
-# Pagination helpers
-# ---------------------------------------------------------------------------
+    # Premium: "Betalt plassering" text anywhere in the card
+    is_featured = "betalt plassering" in card_text
 
-def has_next_page(soup: BeautifulSoup, data: dict | None) -> bool:
-    """Return True if there is a next page of results."""
-    if data:
-        metadata = (
-            dig(data, "props", "pageProps", "initialProps", "searchResult", "metadata")
-            or dig(data, "props", "pageProps", "data", "searchResult", "metadata")
-            or dig(data, "props", "pageProps", "searchResult", "metadata")
-            or {}
-        )
-        if isinstance(metadata, dict):
-            current = metadata.get("current_page") or metadata.get("page") or 0
-            last = metadata.get("last_page") or metadata.get("totalPages") or 0
-            if current and last:
-                return int(current) < int(last)
-
-    # HTML fallback: look for a "next" pagination link
-    next_link = soup.select_one(
-        'a[aria-label*="next" i], a[rel="next"], [data-testid*="next-page"]'
+    # Pluss: dealer logo img in the bottom-right logo slot
+    # <span class="self-end justify-self-end pl-16"> contains an <img>
+    logo_slot = article.select_one(
+        'span[class*="self-end"][class*="justify-self-end"], '
+        'span[class*="justify-self-end"]'
     )
-    return next_link is not None
+    has_logo = bool(logo_slot and logo_slot.find("img"))
+
+    # Car image count (the main listing photo)
+    car_imgs = article.select('div[class*="aspect"] img')
+    img_count = len(car_imgs)
+
+    package = _package(is_featured, has_logo, img_count)
+
+    return {
+        "finnkode": finnkode,
+        "package": package,
+        "is_featured": is_featured,
+        "has_logo": has_logo,
+        "img_count": img_count,
+        "logo_url": "",
+        "source": "html",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _package(is_featured, has_logo, img_count):
+    if is_featured:
+        return "premium"
+    if has_logo:
+        return "pluss"
+    return "basis"
+
+
+def _dig(obj, *keys):
+    for k in keys:
+        if not isinstance(obj, dict):
+            return None
+        obj = obj.get(k)
+    return obj
 
 
 # ---------------------------------------------------------------------------
 # Bucket scraper
 # ---------------------------------------------------------------------------
 
-def scrape_bucket(
-    price_from: int | None, price_to: int | None
-) -> tuple[dict, list[dict]]:
+def scrape_bucket(price_from, price_to):
     counts = {"premium": 0, "pluss": 0, "basis": 0}
-    seen: set[str] = set()
-    debug_rows: list[dict] = []
+    seen = set()
+    debug_rows = []
     label = bucket_label(price_from, price_to)
 
     for page in range(1, MAX_PAGES_PER_BUCKET + 1):
-        try:
-            soup, url = get_page(page, price_from, price_to)
-        except Exception as e:
-            log(f"[ERR] {label} page={page} -> {e}")
+        # Try JSON API first, fall back to HTML
+        rows = fetch_api(page, price_from, price_to)
+        if not rows:
+            try:
+                rows = fetch_html(page, price_from, price_to)
+            except Exception as e:
+                log(f"[ERR] {label} page={page} -> {e}")
+                break
+
+        if not rows:
+            log(f"[STOP] {label} page={page} no listings found")
             break
 
-        data = extract_next_data(soup)
-
-        rows_this_page: list[tuple[str, str, dict]] = []
-
-        if data:
-            docs = find_docs(data)
-            if docs:
-                for doc in docs:
-                    fk, pkg, dbg = classify_doc(doc)
-                    rows_this_page.append((fk, pkg, {**dbg, "source": "json"}))
-            else:
-                log(f"[WARN] {label} page={page} __NEXT_DATA__ found but no docs; falling back to HTML")
-
-        if not rows_this_page:
-            cards = get_html_cards(soup)
-            if not cards:
-                log(f"[STOP] {label} page={page} no cards found (HTML or JSON)")
-                break
-            for card in cards:
-                fk, pkg, dbg = classify_html_card(card)
-                rows_this_page.append((fk, pkg, {**dbg, "source": "html"}))
-
-        new_rows = 0
-        for fk, pkg, dbg in rows_this_page:
+        new = 0
+        for row in rows:
+            fk = row.get("finnkode")
             if not fk or fk in seen:
                 continue
             seen.add(fk)
-            counts[pkg] += 1
-            new_rows += 1
-            debug_rows.append({"price_bracket": label, "page": page, **dbg})
+            counts[row["package"]] += 1
+            new += 1
+            debug_rows.append({"price_bracket": label, "page": page, **row})
 
         log(
-            f"[PAGE] {label} page={page} new={new_rows} "
+            f"[PAGE] {label} page={page} src={rows[0]['source']} new={new} "
             f"total=(Premium={counts['premium']}, Pluss={counts['pluss']}, Basis={counts['basis']})"
         )
 
-        if new_rows == 0:
+        if new == 0:
             log(f"[STOP] {label} page={page} no new listings")
             break
-
-        if new_rows < 5 and page > 3:
+        if new < 5 and page > 3:
             log(f"[STOP] {label} page={page} low activity")
             break
 
@@ -390,7 +354,7 @@ def scrape_bucket(
 # Price buckets
 # ---------------------------------------------------------------------------
 
-def price_buckets(step: int = 10_000, upper: int = 1_000_000) -> list[tuple]:
+def price_buckets(step=10_000, upper=1_000_000):
     intervals = []
     start = 0
     while start < upper:
@@ -402,7 +366,7 @@ def price_buckets(step: int = 10_000, upper: int = 1_000_000) -> list[tuple]:
     return intervals
 
 
-def bucket_label(p_from: int | None, p_to: int | None) -> str:
+def bucket_label(p_from, p_to):
     return f"{p_from}-plus" if p_to is None else f"{p_from}-{p_to}"
 
 
@@ -412,11 +376,11 @@ def bucket_label(p_from: int | None, p_to: int | None) -> str:
 
 def main():
     today_str = date.today().isoformat()
-    buckets = price_buckets(step=10_000, upper=1_000_000)
-    log(f"Starting scrape: {len(buckets)} price buckets (10k NOK steps, cap=1M)")
+    buckets = price_buckets()
+    log(f"Starting scrape: {len(buckets)} buckets (10k NOK steps, cap=1M)")
 
     summary_rows = []
-    all_debug: list[dict] = []
+    all_debug = []
 
     for idx, (p_from, p_to) in enumerate(buckets, start=1):
         label = bucket_label(p_from, p_to)
@@ -442,9 +406,8 @@ def main():
     log(df.to_string())
 
     if all_debug:
-        df_dbg = pd.DataFrame(all_debug)
-        df_dbg.to_csv(DEBUG_CSV, index=False, encoding="utf-8-sig")
-        log(f"[CSV] Debug   -> {DEBUG_CSV}  ({len(df_dbg)} rows)")
+        pd.DataFrame(all_debug).to_csv(DEBUG_CSV, index=False, encoding="utf-8-sig")
+        log(f"[CSV] Debug   -> {DEBUG_CSV}  ({len(all_debug)} rows)")
 
 
 if __name__ == "__main__":
