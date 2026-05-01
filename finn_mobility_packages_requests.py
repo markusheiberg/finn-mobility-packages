@@ -185,11 +185,18 @@ def classify_dealer(finnkode: str, org_name: str) -> str:
 
 def _has_premium_link(raw_html: str) -> bool:
     """
-    Premium dealers have a 'Se annonsen på selgerens side' button whose <a> element
-    carries rel="sponsored". The button text is JS-rendered but rel="sponsored"
-    is present as a raw string in the static HTML response — search directly.
+    Premium dealers are identified by static HTML signals:
+      - "Flere annonser fra oss" section at the bottom (own inventory)
+      - "butikkside med" in link text (vs "butikkside på FINN" for Pluss/Basis)
+      - rel="sponsored" on the external link (fallback, may be JS-rendered)
     """
-    return 'rel="sponsored"' in raw_html or "rel='sponsored'" in raw_html
+    lower = raw_html.lower()
+    return (
+        "flere annonser fra oss" in lower
+        or "butikkside med" in lower
+        or 'rel="sponsored"' in lower
+        or "rel='sponsored'" in lower
+    )
 
 
 def _seller_has_logo(soup: BeautifulSoup) -> bool:
