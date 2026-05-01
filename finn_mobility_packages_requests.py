@@ -22,9 +22,9 @@ DEBUG_CSV = "finn_mobility_debug.csv"
 # ── Package tiers ─────────────────────────────────────────────────────────────
 # All dealer cards occupy the same grid cell. Differences are visual signals:
 #
-#   top   – "Topp"-badge / highlighted border  +  dealer logo  +  ≥3 images
-#   pluss – dealer logo visible  OR  ≥2 car images
-#   basis – single image, no logo
+#   premium – highlighted border / badge  +  dealer logo  +  ≥3 images
+#   pluss   – dealer logo visible  OR  ≥2 car images
+#   basis   – single image, no logo
 #
 # NOTE: Run once with DEBUG_CSV and inspect card_classes / has_logo / img_count
 # to verify these rules against live HTML before trusting the summary counts.
@@ -43,7 +43,7 @@ FEATURED_TESTID_RE = re.compile(r"topp|featured|highlight|premium|top[-_]?ad", r
 # ── URL builder ───────────────────────────────────────────────────────────────
 
 def build_url(page: int, price_from: int | None, price_to: int | None) -> str:
-    params = ["dealer_segment=1"]
+    params = ["dealer_segment=2", "dealer_segment=1"]
     if price_from is not None:
         params.append(f"price_from={price_from}")
     if price_to is not None:
@@ -142,7 +142,7 @@ def classify_card(card) -> tuple[str | None, str, dict]:
     featured  = _is_featured(card)
 
     if featured:
-        package = "top"
+        package = "premium"
     elif has_logo or img_count >= 2:
         package = "pluss"
     else:
@@ -182,7 +182,7 @@ def scrape_bucket(
     price_to: int | None,
     debug_rows: list,
 ) -> dict:
-    counts = {"top": 0, "pluss": 0, "basis": 0}
+    counts = {"premium": 0, "pluss": 0, "basis": 0}
     seen: set[str] = set()
 
     for page in range(1, MAX_PAGES_PER_BUCKET + 1):
@@ -210,7 +210,7 @@ def scrape_bucket(
         print(
             f"[PAGE]  bucket=({price_from},{price_to}) page={page} "
             f"new={new_rows} "
-            f"(top={counts['top']}, pluss={counts['pluss']}, basis={counts['basis']})"
+            f"(premium={counts['premium']}, pluss={counts['pluss']}, basis={counts['basis']})"
         )
 
         if new_rows == 0:
@@ -260,7 +260,7 @@ def main():
     summary_rows: list[dict] = []
     debug_rows:   list[dict] = []
 
-    print(f"Starting scrape: {len(buckets)} price buckets, step=25 000 NOK")
+    print(f"Starting scrape: {len(buckets)} price buckets, step=10 000 NOK")
 
     for idx, (p_from, p_to) in enumerate(buckets, start=1):
         label = bucket_label(p_from, p_to)
@@ -271,11 +271,11 @@ def main():
         counts = scrape_bucket(p_from, p_to, debug_rows)
 
         summary_rows.append({
-            "date_collected": today_str,
-            "price_bracket":  label,
-            "top_count":      counts["top"],
-            "pluss_count":    counts["pluss"],
-            "basis_count":    counts["basis"],
+            "date_collected":  today_str,
+            "price_bracket":   label,
+            "premium_count":   counts["premium"],
+            "pluss_count":     counts["pluss"],
+            "basis_count":     counts["basis"],
         })
 
         time.sleep(0.5)
