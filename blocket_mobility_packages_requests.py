@@ -206,7 +206,7 @@ def classify_dealer(blocketkod: str, org_name: str) -> str:
             package = "pluss"
     except Exception as e:
         log(f"    [ERR] ad fetch -> {e}")
-        return "basis"  # don't cache errors so we can retry in later buckets
+        return None  # don't cache errors, exclude from results
 
     if org_name:
         _dealer_cache[org_name] = package
@@ -231,6 +231,8 @@ def scrape_bucket(price_from, price_to) -> tuple[dict, list[dict]]:
 
     for blocketkod, org_name in listings:
         package = classify_dealer(blocketkod, org_name)
+        if package is None:
+            continue
         counts[package] += 1
         debug_rows.append({
             "price_bracket": label,
