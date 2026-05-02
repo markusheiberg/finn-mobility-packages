@@ -1,0 +1,41 @@
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - build
+      - -t
+      - "$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO/$_IMAGE:$COMMIT_SHA"
+      - -t
+      - "$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO/$_IMAGE:latest"
+      - .
+
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - push
+      - "--all-tags"
+      - "$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO/$_IMAGE"
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - "$_IMAGE"
+      - --image=$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO/$_IMAGE:$COMMIT_SHA
+      - --region=$_REGION
+      - --platform=managed
+      - --no-allow-unauthenticated
+      - --memory=512Mi
+      - --cpu=1
+      - --timeout=3600
+
+substitutions:
+  _REGION: europe-north1
+  _REPO: finn-scraper
+  _IMAGE: finn-mobility-scraper
+
+images:
+  - "$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO/$_IMAGE:$COMMIT_SHA"
+  - "$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO/$_IMAGE:latest"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
