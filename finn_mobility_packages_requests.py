@@ -1,10 +1,11 @@
 import math
 import random
 import re
-import time
+import threading
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 SEARCH_URL = "https://www.finn.no/mobility/search/car"
@@ -20,11 +21,19 @@ HEADERS = {
 }
 
 SAMPLE_FRACTION = 0.05
+MAX_WORKERS = 8
 OUTPUT_CSV = "finn_mobility_packages_summary.csv"
 DEBUG_CSV = "finn_mobility_debug.csv"
 
+# Shared HTTP session: reuses TCP/TLS connections across requests.
+_session = requests.Session()
+_session.headers.update(HEADERS)
+
 # Global dealer cache: org_name -> "premium" | "pluss" | "basis"
 _dealer_cache: dict[str, str] = {}
+_cache_lock = threading.Lock()
+_org_locks: dict[str, threading.Lock] = {}
+_org_locks_lock = threading.Lock()
 
 
 def log(*args):
@@ -63,7 +72,7 @@ def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
     url = search_url(1, price_from, price_to)
     log(f"  [SEARCH] {url}")
     try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
+        r = _session.get(url, timeout=30)
         r.raise_for_status()
     except Exception as e:
         log(f"  [ERR] {label} page=1 -> {e}")
@@ -113,8 +122,6 @@ def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
                 new += 1
 
         log(f"  [PAGE] {label} page={page} new={new} total={len(listings)}")
-        if page != 1:
-            time.sleep(0.05)
 
     # Trim to target by random subsampling to remove within-page ordering bias
     if len(listings) > target:
@@ -129,7 +136,7 @@ def _fetch_page(label, page, price_from, price_to):
     url = search_url(page, price_from, price_to)
     log(f"  [SEARCH] {url}")
     try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
+        r = _session.get(url, timeout=30)
         r.raise_for_status()
         return BeautifulSoup(r.text, "html.parser")
     except Exception as e:
@@ -189,47 +196,48 @@ def _parse_article(article) -> tuple[str | None, str]:
 def classify_dealer(finnkode: str, org_name: str) -> str:
     """
     Fetch the individual ad page and determine package:
-      premium  = logo img present  AND  own inventory via recommendations API
-      pluss    = logo img present  AND  no own inventory
+      premium  = logo img present AND "type":"inventory" in static HTML
+      pluss    = logo img present AND no inventory podlet
       basis    = no logo img in seller section
     Result is cached by org_name so each dealer is fetched only once.
+    Thread-safe: per-org locks prevent concurrent fetches of the same dealer.
     """
-    global _dealer_cache
-
-    if org_name in _dealer_cache:
-        return _dealer_cache[org_name]
-
-    url = AD_URL.format(finnkode)
-    log(f"    [AD] {url}  ({org_name or 'unknown'})")
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
-        r.raise_for_status()
-    except Exception as e:
-        log(f"    [ERR] ad fetch -> {e}")
-        package = "basis"
-        if org_name:
-            _dealer_cache[org_name] = package
-        return package
-
-    raw_html = r.text
-    soup = BeautifulSoup(raw_html, "html.parser")
-
-    # Signal 1: dealerhub logo img → Pluss or Premium (not Basis)
-    has_logo = _seller_has_logo(soup)
-
-    if has_logo:
-        # Signal 2: Premium dealers have an inventory podlet with type="inventory"
-        # in its externalprops attribute — present in static HTML, absent on Pluss.
-        has_inventory = '"type":"inventory"' in raw_html
-        package = "premium" if has_inventory else "pluss"
-    else:
-        package = "basis"
+    with _cache_lock:
+        if org_name and org_name in _dealer_cache:
+            return _dealer_cache[org_name]
 
     if org_name:
-        _dealer_cache[org_name] = package
+        with _org_locks_lock:
+            lock = _org_locks.setdefault(org_name, threading.Lock())
+    else:
+        lock = threading.Lock()
 
-    time.sleep(0.05)
-    return package
+    with lock:
+        with _cache_lock:
+            if org_name and org_name in _dealer_cache:
+                return _dealer_cache[org_name]
+
+        url = AD_URL.format(finnkode)
+        log(f"    [AD] {url}  ({org_name or 'unknown'})")
+        try:
+            r = _session.get(url, timeout=30)
+            r.raise_for_status()
+            raw_html = r.text
+            soup = BeautifulSoup(raw_html, "html.parser")
+            has_logo = _seller_has_logo(soup)
+            if has_logo:
+                has_inventory = '"type":"inventory"' in raw_html
+                package = "premium" if has_inventory else "pluss"
+            else:
+                package = "basis"
+        except Exception as e:
+            log(f"    [ERR] ad fetch -> {e}")
+            package = "basis"
+
+        if org_name:
+            with _cache_lock:
+                _dealer_cache[org_name] = package
+        return package
 
 
 
@@ -267,9 +275,11 @@ def scrape_bucket(price_from, price_to) -> tuple[dict, list[dict]]:
     log(f"  Classifying {len(listings)} listings across "
         f"{len({o for _, o in listings})} unique dealers...")
 
-    # Phase 2: classify each listing via dealer cache
-    for finnkode, org_name in listings:
-        package = classify_dealer(finnkode, org_name)
+    # Phase 2: classify each listing in parallel; cache makes repeat dealers free
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        packages = list(ex.map(lambda args: classify_dealer(*args), listings))
+
+    for (finnkode, org_name), package in zip(listings, packages):
         counts[package] += 1
         debug_rows.append({
             "price_bracket": label,
@@ -336,8 +346,6 @@ def main():
             "total_count": sum(counts.values()),
         })
 
-        time.sleep(0.1)
-
     df = pd.DataFrame(summary_rows)
     df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
     log(f"\n[CSV] Summary -> {OUTPUT_CSV}  ({len(df)} rows)")
@@ -355,7 +363,7 @@ def test_run(n=50):
     log(f"=== TEST RUN: classifying first {n} listings ===")
     url = f"{SEARCH_URL}?dealer_segment=1&dealer_segment=2"
     log(f"[SEARCH] {url}")
-    r = requests.get(url, headers=HEADERS, timeout=30)
+    r = _session.get(url, timeout=30)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
 

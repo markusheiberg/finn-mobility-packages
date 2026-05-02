@@ -1,10 +1,11 @@
 import math
 import random
 import re
-import time
+import threading
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 SEARCH_URL = "https://www.blocket.se/mobility/search/car"
@@ -20,11 +21,20 @@ HEADERS = {
 }
 
 SAMPLE_FRACTION = 0.05
+MAX_WORKERS = 8
 OUTPUT_CSV = "blocket_mobility_packages_summary.csv"
 DEBUG_CSV = "blocket_mobility_debug.csv"
 
+# Shared HTTP session: reuses TCP/TLS connections across requests.
+_session = requests.Session()
+_session.headers.update(HEADERS)
+
 # Global dealer cache: org_name -> "premium" | "pluss" | "basis"
 _dealer_cache: dict[str, str] = {}
+_cache_lock = threading.Lock()
+# Per-org locks ensure two threads don't fetch the same dealer simultaneously.
+_org_locks: dict[str, threading.Lock] = {}
+_org_locks_lock = threading.Lock()
 
 
 def log(*args):
@@ -62,7 +72,7 @@ def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
     url = search_url(1, price_from, price_to)
     log(f"  [SEARCH] {url}")
     try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
+        r = _session.get(url, timeout=30)
         r.raise_for_status()
     except Exception as e:
         log(f"  [ERR] {label} page=1 -> {e}")
@@ -111,8 +121,6 @@ def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
                 new += 1
 
         log(f"  [PAGE] {label} page={page} new={new} total={len(listings)}")
-        if page != 1:
-            time.sleep(0.05)
 
     if len(listings) > target:
         collected = len(listings)
@@ -126,7 +134,7 @@ def _fetch_page(label, page, price_from, price_to):
     url = search_url(page, price_from, price_to)
     log(f"  [SEARCH] {url}")
     try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
+        r = _session.get(url, timeout=30)
         r.raise_for_status()
         return BeautifulSoup(r.text, "html.parser")
     except Exception as e:
@@ -187,38 +195,45 @@ def classify_dealer(blocketkod: str, org_name: str) -> str:
       basis    = "type":"recommendations" in externalprops → "Mer som det här"
       pluss    = neither type present (no recommendations podlet)
     Result is cached by org_name so each dealer is fetched only once.
+    Thread-safe: per-org locks prevent concurrent fetches of the same dealer.
     """
-    global _dealer_cache
+    with _cache_lock:
+        if org_name and org_name in _dealer_cache:
+            return _dealer_cache[org_name]
 
-    if org_name in _dealer_cache:
-        return _dealer_cache[org_name]
-
-    url = AD_URL.format(blocketkod)
-    log(f"    [AD] {url}  ({org_name or 'unknown'})")
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=30)
-        r.raise_for_status()
-    except Exception as e:
-        log(f"    [ERR] ad fetch -> {e}")
-        package = "basis"
-        if org_name:
-            _dealer_cache[org_name] = package
-        return package
-
-    raw_html = r.text
-
-    if '"type":"inventory"' in raw_html:
-        package = "premium"
-    elif '"type":"recommendations"' in raw_html:
-        package = "basis"
-    else:
-        package = "pluss"
-
+    # Acquire a per-org lock so concurrent threads on the same uncached dealer
+    # serialize and only the first one performs the HTTP fetch.
     if org_name:
-        _dealer_cache[org_name] = package
+        with _org_locks_lock:
+            lock = _org_locks.setdefault(org_name, threading.Lock())
+    else:
+        lock = threading.Lock()  # anonymous, no dedup
 
-    time.sleep(0.05)
-    return package
+    with lock:
+        with _cache_lock:
+            if org_name and org_name in _dealer_cache:
+                return _dealer_cache[org_name]
+
+        url = AD_URL.format(blocketkod)
+        log(f"    [AD] {url}  ({org_name or 'unknown'})")
+        try:
+            r = _session.get(url, timeout=30)
+            r.raise_for_status()
+            raw_html = r.text
+            if '"type":"inventory"' in raw_html:
+                package = "premium"
+            elif '"type":"recommendations"' in raw_html:
+                package = "basis"
+            else:
+                package = "pluss"
+        except Exception as e:
+            log(f"    [ERR] ad fetch -> {e}")
+            package = "basis"
+
+        if org_name:
+            with _cache_lock:
+                _dealer_cache[org_name] = package
+        return package
 
 
 # ---------------------------------------------------------------------------
@@ -237,8 +252,10 @@ def scrape_bucket(price_from, price_to) -> tuple[dict, list[dict]]:
     log(f"  Classifying {len(listings)} listings across "
         f"{len({o for _, o in listings})} unique dealers...")
 
-    for blocketkod, org_name in listings:
-        package = classify_dealer(blocketkod, org_name)
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        packages = list(ex.map(lambda args: classify_dealer(*args), listings))
+
+    for (blocketkod, org_name), package in zip(listings, packages):
         counts[package] += 1
         debug_rows.append({
             "price_bracket": label,
@@ -305,8 +322,6 @@ def main():
             "total_count": sum(counts.values()),
         })
 
-        time.sleep(0.1)
-
     df = pd.DataFrame(summary_rows)
     df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
     log(f"\n[CSV] Summary -> {OUTPUT_CSV}  ({len(df)} rows)")
@@ -324,7 +339,7 @@ def test_run(n=50):
     log(f"=== TEST RUN: classifying first {n} listings ===")
     url = f"{SEARCH_URL}?dealer_segment=2"
     log(f"[SEARCH] {url}")
-    r = requests.get(url, headers=HEADERS, timeout=30)
+    r = _session.get(url, timeout=30)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
 
