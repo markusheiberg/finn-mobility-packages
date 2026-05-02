@@ -1,6 +1,6 @@
 # finn-mobility-packages
 
-Scraper that classifies finn.no car dealer listings by their FINN package (Basis / Pluss / Premium).
+Scrapers that classify car dealer listings by package (Basis / Pluss / Premium) on finn.no (Norway) and blocket.se (Sweden).
 
 ## What it does
 
@@ -18,22 +18,38 @@ Logo detection: `img[src*="dealerhub.cdn-vend.com"]` or `img[src*="mobility-comp
 
 Premium detection: `"type":"inventory"` appears in the raw HTML of Premium ad pages inside the Aurora podlet's `externalprops` attribute. It is absent on Pluss pages. All other Premium signals ("Se annonsen på selgerens side", "Flere annonser fra oss", `rel="sponsored"`) are JS-rendered and not in the static HTML.
 
+## Scripts
+
+| Script | Site | Filter |
+|--------|------|--------|
+| `finn_mobility_packages_requests.py` | finn.no | `dealer_segment=1&dealer_segment=2` |
+| `blocket_mobility_packages_requests.py` | blocket.se | `dealer_segment=2` |
+
 ## Running
 
 ```bash
 # Full scrape (~101 buckets, ~5% sample per bucket)
 python3 finn_mobility_packages_requests.py
+python3 blocket_mobility_packages_requests.py
 
 # Quick test on first ~N listings (no price filter)
 python3 finn_mobility_packages_requests.py --test 30
+python3 blocket_mobility_packages_requests.py --test 30
 ```
 
 ## Output
 
+### finn.no
 | File | Contents |
 |------|----------|
 | `finn_mobility_packages_summary.csv` | One row per price bucket: date, bracket, premium/pluss/basis counts, total |
 | `finn_mobility_debug.csv` | One row per listing: price bracket, finnkode, org_name, package |
+
+### blocket.se
+| File | Contents |
+|------|----------|
+| `blocket_mobility_packages_summary.csv` | One row per price bucket: date, bracket, premium/pluss/basis counts, total |
+| `blocket_mobility_debug.csv` | One row per listing: price bracket, blocketkod, org_name, package |
 
 ## Sampling strategy
 
