@@ -1,5 +1,4 @@
 import re
-import time
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -25,11 +24,15 @@ DEBUG_CSV  = "finn_mobility_debug.csv"
 PREMIUM_BADGE_CLS = "bg-[--w-color-badge-warning-background]"   # amber/yellow
 PLUSS_BADGE_CLS   = "bg-[--w-color-badge-negative-background]"  # red
 
+# Shared session: reuses TCP/TLS connections across all requests
+_session = requests.Session()
+_session.headers.update(HEADERS)
+
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
 
 def get(url: str) -> BeautifulSoup:
-    r = requests.get(url, headers=HEADERS, timeout=30)
+    r = _session.get(url, timeout=30)
     r.raise_for_status()
     return BeautifulSoup(r.text, "html.parser")
 
@@ -88,8 +91,6 @@ def get_finnkodes_for_bucket(
             break
         if new < 5 and page > 3:
             break
-
-        time.sleep(0.3)
 
     return finnkodes
 
@@ -159,7 +160,6 @@ def main():
         fks = get_finnkodes_for_bucket(p_from, p_to)
         bucket_finnkodes[label] = fks
         print(f"  → {len(fks)} ads found")
-        time.sleep(0.5)
 
     all_finnkodes = list({fk for fks in bucket_finnkodes.values() for fk in fks})
     print(f"\nPass 1 done. {len(all_finnkodes)} unique finnkodes across all buckets.")
@@ -177,8 +177,6 @@ def main():
         if i % 50 == 0 or i == len(all_finnkodes):
             dist = pd.Series(classification.values()).value_counts().to_dict()
             print(f"  [{i}/{len(all_finnkodes)}] {dist}")
-
-        time.sleep(0.3)
 
     # ── Aggregate per bucket ──────────────────────────────────────────────────
     summary_rows = []
