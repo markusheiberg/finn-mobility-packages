@@ -14,9 +14,19 @@ Scrapes `https://www.finn.no/mobility/search/car?dealer_segment=1&dealer_segment
 | **Pluss** | Dealer logo hosted on `dealerhub.cdn-vend.com` — no inventory podlet |
 | **Premium** | Dealer logo **+** `"type":"inventory"` in the static HTML (Aurora recommendations podlet with own inventory at the bottom) |
 
-Logo detection: `img[src*="dealerhub.cdn-vend.com"]` or `img[src*="mobility-company-profile"]` (excluding NBF badge).
+Logo detection (finn.no only): `img[src*="dealerhub.cdn-vend.com"]` or `img[src*="mobility-company-profile"]` (excluding NBF badge).
 
-Premium detection: `"type":"inventory"` appears in the raw HTML of Premium ad pages inside the Aurora podlet's `externalprops` attribute. It is absent on Pluss pages. All other Premium signals ("Se annonsen på selgerens side", "Flere annonser fra oss", `rel="sponsored"`) are JS-rendered and not in the static HTML.
+Premium detection: `"type":"inventory"` appears in the raw HTML inside the Aurora podlet's `externalprops` attribute. All other Premium signals ("Se annonsen på selgerens side", "Flere annonser fra oss", `rel="sponsored"`) are JS-rendered and not in the static HTML.
+
+### Blocket.se classification (different from finn.no — no logo check)
+
+| Package | Signal in static HTML | Section shown |
+|---------|----------------------|---------------|
+| **Premium** | `"type":"inventory"` in externalprops | "Flera annonser från oss" (own inventory) |
+| **Basis** | `"type":"recommendations"` in externalprops | "Mer som det här" (other dealers) |
+| **Pluss** | Neither type present | No recommendations section |
+
+Logos are not a reliable signal on blocket.se.
 
 ## Scripts
 

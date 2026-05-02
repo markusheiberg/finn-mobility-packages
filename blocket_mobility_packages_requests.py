@@ -183,9 +183,9 @@ def _parse_article(article) -> tuple[str | None, str]:
 def classify_dealer(blocketkod: str, org_name: str) -> str:
     """
     Fetch the individual ad page and determine package:
-      premium  = logo img present  AND  "type":"inventory" in static HTML
-      pluss    = logo img present  AND  no inventory podlet
-      basis    = no logo img in seller section
+      premium  = "type":"inventory" in externalprops  → "Flera annonser från oss"
+      basis    = "type":"recommendations" in externalprops → "Mer som det här"
+      pluss    = neither type present (no recommendations podlet)
     Result is cached by org_name so each dealer is fetched only once.
     """
     global _dealer_cache
@@ -206,35 +206,19 @@ def classify_dealer(blocketkod: str, org_name: str) -> str:
         return package
 
     raw_html = r.text
-    soup = BeautifulSoup(raw_html, "html.parser")
 
-    has_logo = _seller_has_logo(soup)
-
-    if has_logo:
-        has_inventory = '"type":"inventory"' in raw_html
-        package = "premium" if has_inventory else "pluss"
-    else:
+    if '"type":"inventory"' in raw_html:
+        package = "premium"
+    elif '"type":"recommendations"' in raw_html:
         package = "basis"
+    else:
+        package = "pluss"
 
     if org_name:
         _dealer_cache[org_name] = package
 
     time.sleep(0.05)
     return package
-
-
-def _seller_has_logo(soup: BeautifulSoup) -> bool:
-    """
-    Pluss and Premium dealers have their company logo hosted on dealerhub.cdn-vend.com.
-    Basis dealers have no such image — only a bold text company name.
-    """
-    for img in soup.find_all("img"):
-        src = (img.get("src") or "").lower()
-        if "dealerhub.cdn-vend.com" in src:
-            return True
-        if "mobility-company-profile" in src and "nbf" not in src:
-            return True
-    return False
 
 
 # ---------------------------------------------------------------------------
