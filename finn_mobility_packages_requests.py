@@ -19,7 +19,6 @@ HEADERS = {
 }
 
 SAMPLE_FRACTION = 0.05
-MAX_SEARCH_PAGES = 5  # cap search page fetches per bucket regardless of target size
 OUTPUT_CSV = "finn_mobility_packages_summary.csv"
 DEBUG_CSV = "finn_mobility_debug.csv"
 
@@ -88,12 +87,12 @@ def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
 
     total_pages = math.ceil(total / page_size)
     target = math.ceil(total * SAMPLE_FRACTION)
-    pages_to_fetch = min(math.ceil(target / page_size), MAX_SEARCH_PAGES, total_pages)
+    pages_needed = math.ceil(target / page_size)
 
-    if pages_to_fetch >= total_pages:
+    if pages_needed >= total_pages:
         selected_pages = list(range(1, total_pages + 1))
     else:
-        extra = random.sample(range(2, total_pages + 1), pages_to_fetch - 1)
+        extra = random.sample(range(2, total_pages + 1), pages_needed - 1)
         selected_pages = sorted([1] + extra)
 
     log(f"  [SAMPLE] {label} total={total} target={target} "
