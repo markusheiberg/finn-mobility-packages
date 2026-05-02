@@ -1,13 +1,12 @@
-import math
-import random
 import re
+import time
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 from datetime import date
 
 SEARCH_URL = "https://www.finn.no/mobility/search/car"
-AD_URL = "https://www.finn.no/mobility/item/{}"
+AD_URL     = "https://www.finn.no/mobility/item/{finnkode}"
 
 HEADERS = {
     "User-Agent": (
@@ -18,265 +17,117 @@ HEADERS = {
     "Accept-Language": "nb-NO,nb;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
-SAMPLE_FRACTION = 0.05
+MAX_PAGES_PER_BUCKET = 50
 OUTPUT_CSV = "finn_mobility_packages_summary.csv"
-DEBUG_CSV = "finn_mobility_debug.csv"
+DEBUG_CSV  = "finn_mobility_debug.csv"
 
-# Shared HTTP session: reuses TCP/TLS connections across requests.
-_session = requests.Session()
-_session.headers.update(HEADERS)
-
-# Global dealer cache: org_name -> "premium" | "pluss" | "basis"
-_dealer_cache: dict[str, str] = {}
+# Badge CSS classes confirmed from HTML inspection of known Basis/Pluss/Premium ads
+PREMIUM_BADGE_CLS = "bg-[--w-color-badge-warning-background]"   # amber/yellow
+PLUSS_BADGE_CLS   = "bg-[--w-color-badge-negative-background]"  # red
 
 
-def log(*args):
-    print(*args, flush=True)
+# ── HTTP helpers ──────────────────────────────────────────────────────────────
+
+def get(url: str) -> BeautifulSoup:
+    r = requests.get(url, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    return BeautifulSoup(r.text, "html.parser")
 
 
-# ---------------------------------------------------------------------------
-# URL builder
-# ---------------------------------------------------------------------------
-
-def search_url(page, price_from, price_to):
-    params = [("dealer_segment", "1"), ("dealer_segment", "2")]
+def build_search_url(page: int, price_from: int | None, price_to: int | None) -> str:
+    params = ["dealer_segment=2", "dealer_segment=1"]
     if price_from is not None:
-        params.append(("price_from", str(price_from)))
+        params.append(f"price_from={price_from}")
     if price_to is not None:
-        params.append(("price_to", str(price_to)))
+        params.append(f"price_to={price_to}")
     if page > 1:
-        params.append(("page", str(page)))
-    qs = "&".join(f"{k}={v}" for k, v in params)
-    return f"{SEARCH_URL}?{qs}"
+        params.append(f"page={page}")
+    return f"{SEARCH_URL}?{'&'.join(params)}"
 
 
-# ---------------------------------------------------------------------------
-# Phase 1: collect (finnkode, org_name) from search result pages
-# ---------------------------------------------------------------------------
+# ── Pass 1: collect finnkodes from search results ─────────────────────────────
 
-def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
-    """
-    Sample 5% of listings for this price bucket from randomly chosen pages.
-    Page 1 is always fetched first to get the total count; remaining pages
-    are drawn at random across the full page range to avoid recency bias.
-    """
-    label = bucket_label(price_from, price_to)
+def extract_finnkode(href: str | None) -> str | None:
+    if not href:
+        return None
+    m = re.search(r"finnkode=(\d+)", href)
+    if m:
+        return m.group(1)
+    m = re.search(r"/mobility/item/(\d+)", href)
+    return m.group(1) if m else None
 
-    # --- Page 1: get total count and first batch of articles ---
-    url = search_url(1, price_from, price_to)
-    log(f"  [SEARCH] {url}")
-    try:
-        r = _session.get(url, timeout=30)
-        r.raise_for_status()
-    except Exception as e:
-        log(f"  [ERR] {label} page=1 -> {e}")
-        return []
 
-    soup = BeautifulSoup(r.text, "html.parser")
-    articles = soup.find_all("article")
-    if not articles:
-        log(f"  [STOP] {label} no articles on page 1")
-        return []
+def get_finnkodes_for_bucket(
+    price_from: int | None,
+    price_to: int | None,
+) -> list[str]:
+    seen: set[str] = set()
+    finnkodes: list[str] = []
 
-    total = _parse_total_count(soup)
-    page_size = len(articles)
+    for page in range(1, MAX_PAGES_PER_BUCKET + 1):
+        url = build_search_url(page, price_from, price_to)
+        print(f"  [SEARCH] {url}")
+        try:
+            soup = get(url)
+        except Exception as e:
+            print(f"  [ERR] {e}")
+            break
 
-    if total is None:
-        log(f"  [WARN] {label} could not parse total count, using page 1 only")
-        total = page_size
-
-    total_pages = math.ceil(total / page_size)
-    target = math.ceil(total * SAMPLE_FRACTION)
-    pages_needed = math.ceil(target / page_size)
-
-    if pages_needed >= total_pages:
-        selected_pages = list(range(1, total_pages + 1))
-    else:
-        # Randomly pick remaining pages across the full range (excluding page 1)
-        extra = random.sample(range(2, total_pages + 1), pages_needed - 1)
-        selected_pages = sorted([1] + extra)
-
-    log(f"  [SAMPLE] {label} total={total} target={target} "
-        f"pages={len(selected_pages)}/{total_pages} selected={selected_pages}")
-
-    listings: list[tuple[str, str]] = []
-    seen_fk: set[str] = set()
-
-    for page in selected_pages:
-        page_soup = soup if page == 1 else _fetch_page(label, page, price_from, price_to)
-        if page_soup is None:
-            continue
-
+        links = soup.find_all("a", href=lambda h: h and "/mobility/" in h)
         new = 0
-        for art in page_soup.find_all("article"):
-            fk, org = _parse_article(art)
-            if fk and fk not in seen_fk:
-                seen_fk.add(fk)
-                listings.append((fk, org))
+        for link in links:
+            fk = extract_finnkode(link.get("href"))
+            if fk and fk not in seen:
+                seen.add(fk)
+                finnkodes.append(fk)
                 new += 1
 
-        log(f"  [PAGE] {label} page={page} new={new} total={len(listings)}")
+        print(f"  [SEARCH] page={page} new_ids={new} total={len(finnkodes)}")
 
-    # Trim to target by random subsampling to remove within-page ordering bias
-    if len(listings) > target:
-        collected = len(listings)
-        listings = random.sample(listings, target)
-        log(f"  [TRIM] {label} sampled {target} from {collected}")
+        if new == 0:
+            break
+        if new < 5 and page > 3:
+            break
 
-    return listings
+        time.sleep(0.3)
+
+    return finnkodes
 
 
-def _fetch_page(label, page, price_from, price_to):
-    url = search_url(page, price_from, price_to)
-    log(f"  [SEARCH] {url}")
+# ── Pass 2: classify each ad by visiting its page ────────────────────────────
+
+def classify_ad(finnkode: str) -> tuple[str, dict]:
+    url = AD_URL.format(finnkode=finnkode)
     try:
-        r = _session.get(url, timeout=30)
-        r.raise_for_status()
-        return BeautifulSoup(r.text, "html.parser")
+        soup = get(url)
     except Exception as e:
-        log(f"  [ERR] {label} page={page} -> {e}")
-        return None
+        print(f"  [ERR] {finnkode}: {e}")
+        return "error", {"finnkode": finnkode, "package": "error", "error": str(e)}
 
+    all_classes: set[str] = set()
+    for el in soup.find_all(True):
+        for cls in el.get("class") or []:
+            all_classes.add(cls)
 
-def _parse_total_count(soup) -> int | None:
-    """Extract the total listing count shown as 'X treff' on the search page."""
-    for tag in soup.find_all(["h1", "h2", "span", "p", "div"]):
-        text = tag.get_text(" ", strip=True)
-        m = re.search(r"([\d\s\xa0]+)\s*treff", text)
-        if m:
-            try:
-                return int(re.sub(r"\s", "", m.group(1)))
-            except ValueError:
-                pass
-    return None
-
-
-def _parse_article(article) -> tuple[str | None, str]:
-    """Extract (finnkode, org_name) from a search result <article>."""
-    link = article.select_one('a[href*="/mobility/item/"]')
-    if not link:
-        return None, ""
-
-    # Finnkode from <a id="461145507"> or from the href
-    finnkode = link.get("id") or ""
-    if not finnkode:
-        m = re.search(r"/mobility/item/(\d+)", link.get("href", ""))
-        finnkode = m.group(1) if m else ""
-
-    if not finnkode:
-        return None, ""
-
-    # Org name: first "location ∙ DealerName" span, take the part after ∙
-    org = ""
-    for span in article.select("span.truncate"):
-        text = span.get_text(" ", strip=True)
-        if "∙" in text:
-            parts = text.split("∙", 1)
-            if len(parts) == 2:
-                candidate = parts[1].strip()
-                # Ignore lines that look like feature lists ("Forhandler ∙ Service")
-                if not any(kw in candidate.lower() for kw in
-                           ["forhandler", "service", "garanti", "merkeforhandler"]):
-                    org = candidate
-                    break
-
-    return finnkode, org
-
-
-# ---------------------------------------------------------------------------
-# Phase 2: classify a dealer by visiting one individual ad page
-# ---------------------------------------------------------------------------
-
-def classify_dealer(finnkode: str, org_name: str) -> str:
-    """
-    Fetch the individual ad page and determine package:
-      premium  = logo img present AND "type":"inventory" in static HTML
-      pluss    = logo img present AND no inventory podlet
-      basis    = no logo img in seller section
-    Result is cached by org_name so each dealer is fetched only once.
-    """
-    if org_name and org_name in _dealer_cache:
-        return _dealer_cache[org_name]
-
-    url = AD_URL.format(finnkode)
-    log(f"    [AD] {url}  ({org_name or 'unknown'})")
-    try:
-        r = _session.get(url, timeout=30)
-        r.raise_for_status()
-        raw_html = r.text
-        soup = BeautifulSoup(raw_html, "html.parser")
-        has_logo = _seller_has_logo(soup)
-        if has_logo:
-            has_inventory = '"type":"inventory"' in raw_html
-            package = "premium" if has_inventory else "pluss"
-        else:
-            package = "basis"
-    except Exception as e:
-        log(f"    [ERR] ad fetch -> {e}")
+    if PREMIUM_BADGE_CLS in all_classes:
+        package = "premium"
+    elif PLUSS_BADGE_CLS in all_classes:
+        package = "pluss"
+    else:
         package = "basis"
 
-    if org_name:
-        _dealer_cache[org_name] = package
-    return package
+    debug = {
+        "finnkode":          finnkode,
+        "package":           package,
+        "has_premium_badge": PREMIUM_BADGE_CLS in all_classes,
+        "has_pluss_badge":   PLUSS_BADGE_CLS in all_classes,
+    }
+    return package, debug
 
 
-def _seller_has_logo(soup: BeautifulSoup) -> bool:
-    """
-    Pluss and Premium dealers have their company logo hosted on dealerhub.cdn-vend.com.
-    Basis dealers have no such image — only a bold text company name.
-    Confirmed from live pages: both Pluss and Premium have dealerhub logos;
-    Basis does not.
-    """
-    for img in soup.find_all("img"):
-        src = (img.get("src") or "").lower()
-        if "dealerhub.cdn-vend.com" in src:
-            return True
-        # Some dealers may use finn's own profile CDN (exclude the NBF badge)
-        if "mobility-company-profile" in src and "nbf" not in src:
-            return True
-    return False
+# ── Price buckets ─────────────────────────────────────────────────────────────
 
-
-# ---------------------------------------------------------------------------
-# Bucket scraper (combines both phases)
-# ---------------------------------------------------------------------------
-
-def scrape_bucket(price_from, price_to) -> tuple[dict, list[dict]]:
-    label = bucket_label(price_from, price_to)
-    counts = {"premium": 0, "pluss": 0, "basis": 0}
-    debug_rows = []
-
-    # Phase 1: collect listings from search pages
-    listings = collect_listings(price_from, price_to)
-    if not listings:
-        return counts, debug_rows
-
-    log(f"  Classifying {len(listings)} listings across "
-        f"{len({o for _, o in listings})} unique dealers...")
-
-    # Phase 2: classify each listing via dealer cache
-    for finnkode, org_name in listings:
-        package = classify_dealer(finnkode, org_name)
-        counts[package] += 1
-        debug_rows.append({
-            "price_bracket": label,
-            "finnkode": finnkode,
-            "org_name": org_name,
-            "package": package,
-        })
-
-    log(
-        f"  [{label}] Premium={counts['premium']} "
-        f"Pluss={counts['pluss']} Basis={counts['basis']}"
-    )
-    return counts, debug_rows
-
-
-# ---------------------------------------------------------------------------
-# Price buckets
-# ---------------------------------------------------------------------------
-
-def price_buckets(step=10_000, upper=1_000_000):
+def price_buckets(step: int = 10_000, upper: int = 1_000_000):
     intervals = []
     start = 0
     while start < upper:
@@ -288,87 +139,71 @@ def price_buckets(step=10_000, upper=1_000_000):
     return intervals
 
 
-def bucket_label(p_from, p_to):
+def bucket_label(p_from: int | None, p_to: int | None) -> str:
     return f"{p_from}-plus" if p_to is None else f"{p_from}-{p_to}"
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     today_str = date.today().isoformat()
-    buckets = price_buckets()
-    log(f"Starting scrape: {len(buckets)} buckets (10k NOK steps, cap=1M)")
-    log(f"Strategy: collect finnkodes from search pages, "
-        f"classify dealers via individual ad pages (cached per dealer)")
+    buckets   = price_buckets()
 
-    summary_rows = []
-    all_debug: list[dict] = []
+    # ── Pass 1: collect all finnkodes per bucket ──────────────────────────────
+    print(f"=== PASS 1: collecting finnkodes ({len(buckets)} buckets) ===\n")
+    bucket_finnkodes: dict[str, list[str]] = {}
 
-    for idx, (p_from, p_to) in enumerate(buckets, start=1):
+    for idx, (p_from, p_to) in enumerate(buckets, 1):
         label = bucket_label(p_from, p_to)
-        log(f"\n=== BUCKET {idx}/{len(buckets)}: {label} "
-            f"(dealer cache size: {len(_dealer_cache)}) ===")
+        print(f"\n[BUCKET {idx}/{len(buckets)}] {label}")
+        fks = get_finnkodes_for_bucket(p_from, p_to)
+        bucket_finnkodes[label] = fks
+        print(f"  → {len(fks)} ads found")
+        time.sleep(0.5)
 
-        counts, debug_rows = scrape_bucket(p_from, p_to)
-        all_debug.extend(debug_rows)
+    all_finnkodes = list({fk for fks in bucket_finnkodes.values() for fk in fks})
+    print(f"\nPass 1 done. {len(all_finnkodes)} unique finnkodes across all buckets.")
 
+    # ── Pass 2: classify each unique ad ──────────────────────────────────────
+    print(f"\n=== PASS 2: classifying {len(all_finnkodes)} ads ===\n")
+    classification: dict[str, str] = {}
+    debug_rows: list[dict]         = []
+
+    for i, fk in enumerate(all_finnkodes, 1):
+        package, debug = classify_ad(fk)
+        classification[fk] = package
+        debug_rows.append(debug)
+
+        if i % 50 == 0 or i == len(all_finnkodes):
+            dist = pd.Series(classification.values()).value_counts().to_dict()
+            print(f"  [{i}/{len(all_finnkodes)}] {dist}")
+
+        time.sleep(0.3)
+
+    # ── Aggregate per bucket ──────────────────────────────────────────────────
+    summary_rows = []
+    for label, fks in bucket_finnkodes.items():
+        counts = {"premium": 0, "pluss": 0, "basis": 0, "error": 0}
+        for fk in fks:
+            pkg = classification.get(fk, "error")
+            counts[pkg] = counts.get(pkg, 0) + 1
         summary_rows.append({
             "date_collected": today_str,
-            "price_bracket": label,
-            "premium_count": counts["premium"],
-            "pluss_count": counts["pluss"],
-            "basis_count": counts["basis"],
-            "total_count": sum(counts.values()),
+            "price_bracket":  label,
+            "premium_count":  counts["premium"],
+            "pluss_count":    counts["pluss"],
+            "basis_count":    counts["basis"],
         })
 
     df = pd.DataFrame(summary_rows)
     df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
-    log(f"\n[CSV] Summary -> {OUTPUT_CSV}  ({len(df)} rows)")
-    log(df.to_string())
+    print(f"\n[CSV] {len(df)} rows → {OUTPUT_CSV}")
+    print(df[df[["premium_count","pluss_count","basis_count"]].sum(axis=1) > 0].to_string())
 
-    if all_debug:
-        pd.DataFrame(all_debug).to_csv(DEBUG_CSV, index=False, encoding="utf-8-sig")
-        log(f"[CSV] Debug   -> {DEBUG_CSV}  ({len(all_debug)} rows)")
-
-    log(f"\nDealer cache final size: {len(_dealer_cache)}")
-
-
-def test_run(n=50):
-    """Fetch the first page of results (no price filter) and classify n listings."""
-    log(f"=== TEST RUN: classifying first {n} listings ===")
-    url = f"{SEARCH_URL}?dealer_segment=1&dealer_segment=2"
-    log(f"[SEARCH] {url}")
-    r = _session.get(url, timeout=30)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    listings = []
-    seen = set()
-    for art in soup.find_all("article"):
-        fk, org = _parse_article(art)
-        if fk and fk not in seen:
-            seen.add(fk)
-            listings.append((fk, org))
-        if len(listings) >= n:
-            break
-
-    log(f"Found {len(listings)} listings on page 1\n")
-
-    counts = {"premium": 0, "pluss": 0, "basis": 0}
-    for fk, org in listings:
-        pkg = classify_dealer(fk, org)
-        counts[pkg] += 1
-        log(f"  {fk:>12}  {pkg:<8}  {org}")
-
-    log(f"\nResult: Premium={counts['premium']}  Pluss={counts['pluss']}  Basis={counts['basis']}")
+    if debug_rows:
+        pd.DataFrame(debug_rows).to_csv(DEBUG_CSV, index=False, encoding="utf-8-sig")
+        print(f"[DEBUG CSV] → {DEBUG_CSV}")
 
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "--test":
-        n = int(sys.argv[2]) if len(sys.argv) > 2 else 50
-        test_run(n)
-    else:
-        main()
+    main()
