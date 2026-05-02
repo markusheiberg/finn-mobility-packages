@@ -195,7 +195,7 @@ def classify_dealer(blocketkod: str, org_name: str) -> str:
     url = AD_URL.format(blocketkod)
     log(f"    [AD] {url}  ({org_name or 'unknown'})")
     try:
-        r = _session.get(url, timeout=30)
+        r = _session.get(url, timeout=10)
         r.raise_for_status()
         raw_html = r.text
         if '"type":"inventory"' in raw_html:
@@ -206,7 +206,7 @@ def classify_dealer(blocketkod: str, org_name: str) -> str:
             package = "pluss"
     except Exception as e:
         log(f"    [ERR] ad fetch -> {e}")
-        package = "basis"
+        return "basis"  # don't cache errors so we can retry in later buckets
 
     if org_name:
         _dealer_cache[org_name] = package
