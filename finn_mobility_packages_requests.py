@@ -1,4 +1,5 @@
 import re
+import time
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -177,6 +178,8 @@ def main():
         if i % 50 == 0 or i == len(all_finnkodes):
             dist = pd.Series(classification.values()).value_counts().to_dict()
             print(f"  [{i}/{len(all_finnkodes)}] {dist}")
+
+        time.sleep(0.1)
 
     # ── Aggregate per bucket ──────────────────────────────────────────────────
     summary_rows = []
