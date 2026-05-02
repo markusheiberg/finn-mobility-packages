@@ -81,7 +81,7 @@ def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
         log(f"  [WARN] {label} could not parse total count, using page 1 only")
         total = page_size
 
-    total_pages = math.ceil(total / page_size)
+    total_pages = min(math.ceil(total / page_size), 50)  # blocket caps at page 50
     target = math.ceil(total * SAMPLE_FRACTION)
     pages_needed = math.ceil(target / page_size)
 
@@ -258,7 +258,7 @@ def scrape_bucket(price_from, price_to) -> tuple[dict, list[dict]]:
 # Price buckets
 # ---------------------------------------------------------------------------
 
-def price_buckets(step=10_000, upper=1_000_000):
+def price_buckets(step=25_000, upper=1_000_000):
     intervals = []
     start = 0
     while start < upper:
@@ -281,7 +281,7 @@ def bucket_label(p_from, p_to):
 def main():
     today_str = date.today().isoformat()
     buckets = price_buckets()
-    log(f"Starting scrape: {len(buckets)} buckets (10k SEK steps, cap=1M)")
+    log(f"Starting scrape: {len(buckets)} buckets (25k SEK steps, cap=1M, max 50 pages/bucket)")
     log(f"Strategy: collect blocketkodes from search pages, "
         f"classify dealers via individual ad pages (cached per dealer)")
 
