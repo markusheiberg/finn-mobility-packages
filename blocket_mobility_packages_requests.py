@@ -6,8 +6,8 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from datetime import date
 
-SEARCH_URL = "https://www.finn.no/mobility/search/car"
-AD_URL = "https://www.finn.no/mobility/item/{}"
+SEARCH_URL = "https://www.blocket.se/mobility/search/car"
+AD_URL = "https://www.blocket.se/mobility/item/{}"
 
 HEADERS = {
     "User-Agent": (
@@ -15,12 +15,12 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "nb-NO,nb;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Language": "sv-SE,sv;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
 SAMPLE_FRACTION = 0.05
-OUTPUT_CSV = "finn_mobility_packages_summary.csv"
-DEBUG_CSV = "finn_mobility_debug.csv"
+OUTPUT_CSV = "blocket_mobility_packages_summary.csv"
+DEBUG_CSV = "blocket_mobility_debug.csv"
 
 # Shared HTTP session: reuses TCP/TLS connections across requests.
 _session = requests.Session()
@@ -39,7 +39,7 @@ def log(*args):
 # ---------------------------------------------------------------------------
 
 def search_url(page, price_from, price_to):
-    params = [("dealer_segment", "1"), ("dealer_segment", "2")]
+    params = [("dealer_segment", "2")]
     if price_from is not None:
         params.append(("price_from", str(price_from)))
     if price_to is not None:
@@ -51,7 +51,7 @@ def search_url(page, price_from, price_to):
 
 
 # ---------------------------------------------------------------------------
-# Phase 1: collect (finnkode, org_name) from search result pages
+# Phase 1: collect (blocketkod, org_name) from search result pages
 # ---------------------------------------------------------------------------
 
 def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
@@ -62,7 +62,6 @@ def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
     """
     label = bucket_label(price_from, price_to)
 
-    # --- Page 1: get total count and first batch of articles ---
     url = search_url(1, price_from, price_to)
     log(f"  [SEARCH] {url}")
     try:
@@ -85,14 +84,13 @@ def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
         log(f"  [WARN] {label} could not parse total count, using page 1 only")
         total = page_size
 
-    total_pages = math.ceil(total / page_size)
+    total_pages = min(math.ceil(total / page_size), 50)  # blocket caps at page 50
     target = math.ceil(total * SAMPLE_FRACTION)
     pages_needed = math.ceil(target / page_size)
 
     if pages_needed >= total_pages:
         selected_pages = list(range(1, total_pages + 1))
     else:
-        # Randomly pick remaining pages across the full range (excluding page 1)
         extra = random.sample(range(2, total_pages + 1), pages_needed - 1)
         selected_pages = sorted([1] + extra)
 
@@ -117,7 +115,6 @@ def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
 
         log(f"  [PAGE] {label} page={page} new={new} total={len(listings)}")
 
-    # Trim to target by random subsampling to remove within-page ordering bias
     if len(listings) > target:
         collected = len(listings)
         listings = random.sample(listings, target)
@@ -139,34 +136,32 @@ def _fetch_page(label, page, price_from, price_to):
 
 
 def _parse_total_count(soup) -> int | None:
-    """Extract the total listing count shown as 'X treff' on the search page."""
+    """Extract total listing count shown as 'X resultat' on the search page."""
     for tag in soup.find_all(["h1", "h2", "span", "p", "div"]):
         text = tag.get_text(" ", strip=True)
-        m = re.search(r"([\d\s\xa0]+)\s*treff", text)
+        m = re.search(r"([\d\s\xa0 ]+)\s*(resultat|träffar|annonser|treff)", text)
         if m:
             try:
-                return int(re.sub(r"\s", "", m.group(1)))
+                return int(re.sub(r"[\s\xa0 ]", "", m.group(1)))
             except ValueError:
                 pass
     return None
 
 
 def _parse_article(article) -> tuple[str | None, str]:
-    """Extract (finnkode, org_name) from a search result <article>."""
+    """Extract (blocketkod, org_name) from a search result <article>."""
     link = article.select_one('a[href*="/mobility/item/"]')
     if not link:
         return None, ""
 
-    # Finnkode from <a id="461145507"> or from the href
-    finnkode = link.get("id") or ""
-    if not finnkode:
+    blocketkod = link.get("id") or ""
+    if not blocketkod:
         m = re.search(r"/mobility/item/(\d+)", link.get("href", ""))
-        finnkode = m.group(1) if m else ""
+        blocketkod = m.group(1) if m else ""
 
-    if not finnkode:
+    if not blocketkod:
         return None, ""
 
-    # Org name: first "location ∙ DealerName" span, take the part after ∙
     org = ""
     for span in article.select("span.truncate"):
         text = span.get_text(" ", strip=True)
@@ -174,43 +169,41 @@ def _parse_article(article) -> tuple[str | None, str]:
             parts = text.split("∙", 1)
             if len(parts) == 2:
                 candidate = parts[1].strip()
-                # Ignore lines that look like feature lists ("Forhandler ∙ Service")
                 if not any(kw in candidate.lower() for kw in
-                           ["forhandler", "service", "garanti", "merkeforhandler"]):
+                           ["handlare", "service", "garanti", "märkeshandlare"]):
                     org = candidate
                     break
 
-    return finnkode, org
+    return blocketkod, org
 
 
 # ---------------------------------------------------------------------------
 # Phase 2: classify a dealer by visiting one individual ad page
 # ---------------------------------------------------------------------------
 
-def classify_dealer(finnkode: str, org_name: str) -> str:
+def classify_dealer(blocketkod: str, org_name: str) -> str:
     """
     Fetch the individual ad page and determine package:
-      premium  = logo img present AND "type":"inventory" in static HTML
-      pluss    = logo img present AND no inventory podlet
-      basis    = no logo img in seller section
+      premium  = "type":"inventory" in externalprops  → "Flera annonser från oss"
+      basis    = "type":"recommendations" in externalprops → "Mer som det här"
+      pluss    = neither type present (no recommendations podlet)
     Result is cached by org_name so each dealer is fetched only once.
     """
     if org_name and org_name in _dealer_cache:
         return _dealer_cache[org_name]
 
-    url = AD_URL.format(finnkode)
+    url = AD_URL.format(blocketkod)
     log(f"    [AD] {url}  ({org_name or 'unknown'})")
     try:
         r = _session.get(url, timeout=30)
         r.raise_for_status()
         raw_html = r.text
-        soup = BeautifulSoup(raw_html, "html.parser")
-        has_logo = _seller_has_logo(soup)
-        if has_logo:
-            has_inventory = '"type":"inventory"' in raw_html
-            package = "premium" if has_inventory else "pluss"
-        else:
+        if '"type":"inventory"' in raw_html:
+            package = "premium"
+        elif '"type":"recommendations"' in raw_html:
             package = "basis"
+        else:
+            package = "pluss"
     except Exception as e:
         log(f"    [ERR] ad fetch -> {e}")
         package = "basis"
@@ -218,23 +211,6 @@ def classify_dealer(finnkode: str, org_name: str) -> str:
     if org_name:
         _dealer_cache[org_name] = package
     return package
-
-
-def _seller_has_logo(soup: BeautifulSoup) -> bool:
-    """
-    Pluss and Premium dealers have their company logo hosted on dealerhub.cdn-vend.com.
-    Basis dealers have no such image — only a bold text company name.
-    Confirmed from live pages: both Pluss and Premium have dealerhub logos;
-    Basis does not.
-    """
-    for img in soup.find_all("img"):
-        src = (img.get("src") or "").lower()
-        if "dealerhub.cdn-vend.com" in src:
-            return True
-        # Some dealers may use finn's own profile CDN (exclude the NBF badge)
-        if "mobility-company-profile" in src and "nbf" not in src:
-            return True
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +222,6 @@ def scrape_bucket(price_from, price_to) -> tuple[dict, list[dict]]:
     counts = {"premium": 0, "pluss": 0, "basis": 0}
     debug_rows = []
 
-    # Phase 1: collect listings from search pages
     listings = collect_listings(price_from, price_to)
     if not listings:
         return counts, debug_rows
@@ -254,13 +229,12 @@ def scrape_bucket(price_from, price_to) -> tuple[dict, list[dict]]:
     log(f"  Classifying {len(listings)} listings across "
         f"{len({o for _, o in listings})} unique dealers...")
 
-    # Phase 2: classify each listing via dealer cache
-    for finnkode, org_name in listings:
-        package = classify_dealer(finnkode, org_name)
+    for blocketkod, org_name in listings:
+        package = classify_dealer(blocketkod, org_name)
         counts[package] += 1
         debug_rows.append({
             "price_bracket": label,
-            "finnkode": finnkode,
+            "blocketkod": blocketkod,
             "org_name": org_name,
             "package": package,
         })
@@ -276,7 +250,7 @@ def scrape_bucket(price_from, price_to) -> tuple[dict, list[dict]]:
 # Price buckets
 # ---------------------------------------------------------------------------
 
-def price_buckets(step=10_000, upper=1_000_000):
+def price_buckets(step=25_000, upper=1_000_000):
     intervals = []
     start = 0
     while start < upper:
@@ -299,8 +273,8 @@ def bucket_label(p_from, p_to):
 def main():
     today_str = date.today().isoformat()
     buckets = price_buckets()
-    log(f"Starting scrape: {len(buckets)} buckets (10k NOK steps, cap=1M)")
-    log(f"Strategy: collect finnkodes from search pages, "
+    log(f"Starting scrape: {len(buckets)} buckets (25k SEK steps, cap=1M, max 50 pages/bucket)")
+    log(f"Strategy: collect blocketkodes from search pages, "
         f"classify dealers via individual ad pages (cached per dealer)")
 
     summary_rows = []
@@ -338,7 +312,7 @@ def main():
 def test_run(n=50):
     """Fetch the first page of results (no price filter) and classify n listings."""
     log(f"=== TEST RUN: classifying first {n} listings ===")
-    url = f"{SEARCH_URL}?dealer_segment=1&dealer_segment=2"
+    url = f"{SEARCH_URL}?dealer_segment=2"
     log(f"[SEARCH] {url}")
     r = _session.get(url, timeout=30)
     r.raise_for_status()
