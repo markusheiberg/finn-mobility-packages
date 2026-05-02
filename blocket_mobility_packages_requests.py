@@ -1,13 +1,12 @@
-import math
-import random
 import re
+import time
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 from datetime import date
 
 SEARCH_URL = "https://www.blocket.se/mobility/search/car"
-AD_URL = "https://www.blocket.se/mobility/item/{}"
+AD_URL     = "https://www.blocket.se/mobility/item/{blocketkod}"
 
 HEADERS = {
     "User-Agent": (
@@ -18,182 +17,82 @@ HEADERS = {
     "Accept-Language": "sv-SE,sv;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
-SAMPLE_FRACTION = 0.05
+MAX_PAGES_PER_BUCKET = 50
 OUTPUT_CSV = "blocket_mobility_packages_summary.csv"
-DEBUG_CSV = "blocket_mobility_debug.csv"
+DEBUG_CSV  = "blocket_mobility_debug.csv"
 
-# Shared HTTP session: reuses TCP/TLS connections across requests.
+# Shared session: reuses TCP/TLS connections across all requests
 _session = requests.Session()
 _session.headers.update(HEADERS)
 
-# Global dealer cache: org_name -> "premium" | "pluss" | "basis"
-_dealer_cache: dict[str, str] = {}
+
+# ── HTTP helpers ──────────────────────────────────────────────────────────────
+
+def get(url: str) -> BeautifulSoup:
+    r = _session.get(url, timeout=30)
+    r.raise_for_status()
+    return BeautifulSoup(r.text, "html.parser")
 
 
-def log(*args):
-    print(*args, flush=True)
-
-
-# ---------------------------------------------------------------------------
-# URL builder
-# ---------------------------------------------------------------------------
-
-def search_url(page, price_from, price_to):
-    params = [("dealer_segment", "2")]
+def build_search_url(page: int, price_from: int | None, price_to: int | None) -> str:
+    params = ["dealer_segment=2"]
     if price_from is not None:
-        params.append(("price_from", str(price_from)))
+        params.append(f"price_from={price_from}")
     if price_to is not None:
-        params.append(("price_to", str(price_to)))
+        params.append(f"price_to={price_to}")
     if page > 1:
-        params.append(("page", str(page)))
-    qs = "&".join(f"{k}={v}" for k, v in params)
-    return f"{SEARCH_URL}?{qs}"
+        params.append(f"page={page}")
+    return f"{SEARCH_URL}?{'&'.join(params)}"
 
 
-# ---------------------------------------------------------------------------
-# Phase 1: collect (blocketkod, org_name) from search result pages
-# ---------------------------------------------------------------------------
+# ── Pass 1: collect blocketkodes from search results ─────────────────────────
 
-def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
-    """
-    Sample 5% of listings for this price bucket from randomly chosen pages.
-    Page 1 is always fetched first to get the total count; remaining pages
-    are drawn at random across the full page range to avoid recency bias.
-    """
-    label = bucket_label(price_from, price_to)
+def extract_blocketkod(href: str | None) -> str | None:
+    if not href:
+        return None
+    m = re.search(r"/mobility/item/(\d+)", href)
+    return m.group(1) if m else None
 
-    url = search_url(1, price_from, price_to)
-    log(f"  [SEARCH] {url}")
-    try:
-        r = _session.get(url, timeout=30)
-        r.raise_for_status()
-    except Exception as e:
-        log(f"  [ERR] {label} page=1 -> {e}")
-        return []
 
-    soup = BeautifulSoup(r.text, "html.parser")
-    articles = soup.find_all("article")
-    if not articles:
-        log(f"  [STOP] {label} no articles on page 1")
-        return []
+def get_blocketkodes_for_bucket(
+    price_from: int | None,
+    price_to: int | None,
+) -> list[str]:
+    seen: set[str] = set()
+    blocketkodes: list[str] = []
 
-    total = _parse_total_count(soup)
-    page_size = len(articles)
+    for page in range(1, MAX_PAGES_PER_BUCKET + 1):
+        url = build_search_url(page, price_from, price_to)
+        print(f"  [SEARCH] {url}")
+        try:
+            soup = get(url)
+        except Exception as e:
+            print(f"  [ERR] {e}")
+            break
 
-    if total is None:
-        log(f"  [WARN] {label} could not parse total count, using page 1 only")
-        total = page_size
-
-    total_pages = min(math.ceil(total / page_size), 50)  # blocket caps at page 50
-    target = math.ceil(total * SAMPLE_FRACTION)
-    pages_needed = math.ceil(target / page_size)
-
-    if pages_needed >= total_pages:
-        selected_pages = list(range(1, total_pages + 1))
-    else:
-        extra = random.sample(range(2, total_pages + 1), pages_needed - 1)
-        selected_pages = sorted([1] + extra)
-
-    log(f"  [SAMPLE] {label} total={total} target={target} "
-        f"pages={len(selected_pages)}/{total_pages} selected={selected_pages}")
-
-    listings: list[tuple[str, str]] = []
-    seen_fk: set[str] = set()
-
-    for page in selected_pages:
-        page_soup = soup if page == 1 else _fetch_page(label, page, price_from, price_to)
-        if page_soup is None:
-            continue
-
+        links = soup.find_all("a", href=lambda h: h and "/mobility/" in h)
         new = 0
-        for art in page_soup.find_all("article"):
-            fk, org = _parse_article(art)
-            if fk and fk not in seen_fk:
-                seen_fk.add(fk)
-                listings.append((fk, org))
+        for link in links:
+            bk = extract_blocketkod(link.get("href"))
+            if bk and bk not in seen:
+                seen.add(bk)
+                blocketkodes.append(bk)
                 new += 1
 
-        log(f"  [PAGE] {label} page={page} new={new} total={len(listings)}")
+        print(f"  [SEARCH] page={page} new_ids={new} total={len(blocketkodes)}")
 
-    if len(listings) > target:
-        collected = len(listings)
-        listings = random.sample(listings, target)
-        log(f"  [TRIM] {label} sampled {target} from {collected}")
+        if new == 0:
+            break
+        if new < 5 and page > 3:
+            break
 
-    return listings
-
-
-def _fetch_page(label, page, price_from, price_to):
-    url = search_url(page, price_from, price_to)
-    log(f"  [SEARCH] {url}")
-    try:
-        r = _session.get(url, timeout=30)
-        r.raise_for_status()
-        return BeautifulSoup(r.text, "html.parser")
-    except Exception as e:
-        log(f"  [ERR] {label} page={page} -> {e}")
-        return None
+    return blocketkodes
 
 
-def _parse_total_count(soup) -> int | None:
-    """Extract total listing count shown as 'X resultat' on the search page."""
-    for tag in soup.find_all(["h1", "h2", "span", "p", "div"]):
-        text = tag.get_text(" ", strip=True)
-        m = re.search(r"([\d\s\xa0 ]+)\s*(resultat|träffar|annonser|treff)", text)
-        if m:
-            try:
-                return int(re.sub(r"[\s\xa0 ]", "", m.group(1)))
-            except ValueError:
-                pass
-    return None
+# ── Pass 2: classify each ad by visiting its page ────────────────────────────
 
-
-def _parse_article(article) -> tuple[str | None, str]:
-    """Extract (blocketkod, org_name) from a search result <article>."""
-    link = article.select_one('a[href*="/mobility/item/"]')
-    if not link:
-        return None, ""
-
-    blocketkod = link.get("id") or ""
-    if not blocketkod:
-        m = re.search(r"/mobility/item/(\d+)", link.get("href", ""))
-        blocketkod = m.group(1) if m else ""
-
-    if not blocketkod:
-        return None, ""
-
-    org = ""
-    for span in article.select("span.truncate"):
-        text = span.get_text(" ", strip=True)
-        if "∙" in text:
-            parts = text.split("∙", 1)
-            if len(parts) == 2:
-                candidate = parts[1].strip()
-                if not any(kw in candidate.lower() for kw in
-                           ["handlare", "service", "garanti", "märkeshandlare"]):
-                    org = candidate
-                    break
-
-    return blocketkod, org
-
-
-# ---------------------------------------------------------------------------
-# Phase 2: classify a dealer by visiting one individual ad page
-# ---------------------------------------------------------------------------
-
-def classify_dealer(blocketkod: str, org_name: str) -> str:
-    """
-    Fetch the individual ad page and determine package:
-      premium  = "type":"inventory" in externalprops  → "Flera annonser från oss"
-      basis    = "type":"recommendations" in externalprops → "Mer som det här"
-      pluss    = neither type present (no recommendations podlet)
-    Result is cached by org_name so each dealer is fetched only once.
-    """
-    if org_name and org_name in _dealer_cache:
-        return _dealer_cache[org_name]
-
-    url = AD_URL.format(blocketkod)
-    log(f"    [AD] {url}  ({org_name or 'unknown'})")
+def classify_ad(blocketkod: str) -> tuple[str, dict]:
+    url = AD_URL.format(blocketkod=blocketkod)
     try:
         r = _session.get(url, timeout=30)
         r.raise_for_status()
@@ -205,52 +104,21 @@ def classify_dealer(blocketkod: str, org_name: str) -> str:
         else:
             package = "pluss"
     except Exception as e:
-        log(f"    [ERR] ad fetch -> {e}")
-        package = "basis"
+        print(f"  [ERR] {blocketkod}: {e}")
+        return "error", {"blocketkod": blocketkod, "package": "error", "error": str(e)}
 
-    if org_name:
-        _dealer_cache[org_name] = package
-    return package
-
-
-# ---------------------------------------------------------------------------
-# Bucket scraper (combines both phases)
-# ---------------------------------------------------------------------------
-
-def scrape_bucket(price_from, price_to) -> tuple[dict, list[dict]]:
-    label = bucket_label(price_from, price_to)
-    counts = {"premium": 0, "pluss": 0, "basis": 0}
-    debug_rows = []
-
-    listings = collect_listings(price_from, price_to)
-    if not listings:
-        return counts, debug_rows
-
-    log(f"  Classifying {len(listings)} listings across "
-        f"{len({o for _, o in listings})} unique dealers...")
-
-    for blocketkod, org_name in listings:
-        package = classify_dealer(blocketkod, org_name)
-        counts[package] += 1
-        debug_rows.append({
-            "price_bracket": label,
-            "blocketkod": blocketkod,
-            "org_name": org_name,
-            "package": package,
-        })
-
-    log(
-        f"  [{label}] Premium={counts['premium']} "
-        f"Pluss={counts['pluss']} Basis={counts['basis']}"
-    )
-    return counts, debug_rows
+    debug = {
+        "blocketkod":         blocketkod,
+        "package":            package,
+        "has_inventory":      '"type":"inventory"' in raw_html,
+        "has_recommendations": '"type":"recommendations"' in raw_html,
+    }
+    return package, debug
 
 
-# ---------------------------------------------------------------------------
-# Price buckets
-# ---------------------------------------------------------------------------
+# ── Price buckets ─────────────────────────────────────────────────────────────
 
-def price_buckets(step=25_000, upper=1_000_000):
+def price_buckets(step: int = 25_000, upper: int = 1_000_000):
     intervals = []
     start = 0
     while start < upper:
@@ -262,87 +130,70 @@ def price_buckets(step=25_000, upper=1_000_000):
     return intervals
 
 
-def bucket_label(p_from, p_to):
+def bucket_label(p_from: int | None, p_to: int | None) -> str:
     return f"{p_from}-plus" if p_to is None else f"{p_from}-{p_to}"
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     today_str = date.today().isoformat()
-    buckets = price_buckets()
-    log(f"Starting scrape: {len(buckets)} buckets (25k SEK steps, cap=1M, max 50 pages/bucket)")
-    log(f"Strategy: collect blocketkodes from search pages, "
-        f"classify dealers via individual ad pages (cached per dealer)")
+    buckets   = price_buckets()
 
-    summary_rows = []
-    all_debug: list[dict] = []
+    # ── Pass 1: collect all blocketkodes per bucket ───────────────────────────
+    print(f"=== PASS 1: collecting blocketkodes ({len(buckets)} buckets) ===\n")
+    bucket_blocketkodes: dict[str, list[str]] = {}
 
-    for idx, (p_from, p_to) in enumerate(buckets, start=1):
+    for idx, (p_from, p_to) in enumerate(buckets, 1):
         label = bucket_label(p_from, p_to)
-        log(f"\n=== BUCKET {idx}/{len(buckets)}: {label} "
-            f"(dealer cache size: {len(_dealer_cache)}) ===")
+        print(f"\n[BUCKET {idx}/{len(buckets)}] {label}")
+        bks = get_blocketkodes_for_bucket(p_from, p_to)
+        bucket_blocketkodes[label] = bks
+        print(f"  → {len(bks)} ads found")
 
-        counts, debug_rows = scrape_bucket(p_from, p_to)
-        all_debug.extend(debug_rows)
+    all_blocketkodes = list({bk for bks in bucket_blocketkodes.values() for bk in bks})
+    print(f"\nPass 1 done. {len(all_blocketkodes)} unique blocketkodes across all buckets.")
 
+    # ── Pass 2: classify each unique ad ──────────────────────────────────────
+    print(f"\n=== PASS 2: classifying {len(all_blocketkodes)} ads ===\n")
+    classification: dict[str, str] = {}
+    debug_rows: list[dict]         = []
+
+    for i, bk in enumerate(all_blocketkodes, 1):
+        package, debug = classify_ad(bk)
+        classification[bk] = package
+        debug_rows.append(debug)
+
+        if i % 50 == 0 or i == len(all_blocketkodes):
+            dist = pd.Series(classification.values()).value_counts().to_dict()
+            print(f"  [{i}/{len(all_blocketkodes)}] {dist}")
+
+        time.sleep(0.1)
+
+    # ── Aggregate per bucket ──────────────────────────────────────────────────
+    summary_rows = []
+    for label, bks in bucket_blocketkodes.items():
+        counts = {"premium": 0, "pluss": 0, "basis": 0, "error": 0}
+        for bk in bks:
+            pkg = classification.get(bk, "error")
+            counts[pkg] = counts.get(pkg, 0) + 1
         summary_rows.append({
             "date_collected": today_str,
-            "price_bracket": label,
-            "premium_count": counts["premium"],
-            "pluss_count": counts["pluss"],
-            "basis_count": counts["basis"],
-            "total_count": sum(counts.values()),
+            "price_bracket":  label,
+            "premium_count":  counts["premium"],
+            "pluss_count":    counts["pluss"],
+            "basis_count":    counts["basis"],
         })
 
     df = pd.DataFrame(summary_rows)
     df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
-    log(f"\n[CSV] Summary -> {OUTPUT_CSV}  ({len(df)} rows)")
-    log(df.to_string())
+    print(f"\n[CSV] {len(df)} rows → {OUTPUT_CSV}")
+    print(df[df[["premium_count","pluss_count","basis_count"]].sum(axis=1) > 0].to_string())
 
-    if all_debug:
-        pd.DataFrame(all_debug).to_csv(DEBUG_CSV, index=False, encoding="utf-8-sig")
-        log(f"[CSV] Debug   -> {DEBUG_CSV}  ({len(all_debug)} rows)")
-
-    log(f"\nDealer cache final size: {len(_dealer_cache)}")
-
-
-def test_run(n=50):
-    """Fetch the first page of results (no price filter) and classify n listings."""
-    log(f"=== TEST RUN: classifying first {n} listings ===")
-    url = f"{SEARCH_URL}?dealer_segment=2"
-    log(f"[SEARCH] {url}")
-    r = _session.get(url, timeout=30)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    listings = []
-    seen = set()
-    for art in soup.find_all("article"):
-        fk, org = _parse_article(art)
-        if fk and fk not in seen:
-            seen.add(fk)
-            listings.append((fk, org))
-        if len(listings) >= n:
-            break
-
-    log(f"Found {len(listings)} listings on page 1\n")
-
-    counts = {"premium": 0, "pluss": 0, "basis": 0}
-    for fk, org in listings:
-        pkg = classify_dealer(fk, org)
-        counts[pkg] += 1
-        log(f"  {fk:>12}  {pkg:<8}  {org}")
-
-    log(f"\nResult: Premium={counts['premium']}  Pluss={counts['pluss']}  Basis={counts['basis']}")
+    if debug_rows:
+        pd.DataFrame(debug_rows).to_csv(DEBUG_CSV, index=False, encoding="utf-8-sig")
+        print(f"[DEBUG CSV] → {DEBUG_CSV}")
 
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "--test":
-        n = int(sys.argv[2]) if len(sys.argv) > 2 else 50
-        test_run(n)
-    else:
-        main()
+    main()
