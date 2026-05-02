@@ -1,11 +1,9 @@
 import math
 import random
 import re
-import threading
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 SEARCH_URL = "https://www.finn.no/mobility/search/car"
@@ -21,7 +19,6 @@ HEADERS = {
 }
 
 SAMPLE_FRACTION = 0.05
-MAX_WORKERS = 8
 OUTPUT_CSV = "finn_mobility_packages_summary.csv"
 DEBUG_CSV = "finn_mobility_debug.csv"
 
@@ -31,9 +28,6 @@ _session.headers.update(HEADERS)
 
 # Global dealer cache: org_name -> "premium" | "pluss" | "basis"
 _dealer_cache: dict[str, str] = {}
-_cache_lock = threading.Lock()
-_org_locks: dict[str, threading.Lock] = {}
-_org_locks_lock = threading.Lock()
 
 
 def log(*args):
@@ -200,44 +194,30 @@ def classify_dealer(finnkode: str, org_name: str) -> str:
       pluss    = logo img present AND no inventory podlet
       basis    = no logo img in seller section
     Result is cached by org_name so each dealer is fetched only once.
-    Thread-safe: per-org locks prevent concurrent fetches of the same dealer.
     """
-    with _cache_lock:
-        if org_name and org_name in _dealer_cache:
-            return _dealer_cache[org_name]
+    if org_name and org_name in _dealer_cache:
+        return _dealer_cache[org_name]
+
+    url = AD_URL.format(finnkode)
+    log(f"    [AD] {url}  ({org_name or 'unknown'})")
+    try:
+        r = _session.get(url, timeout=30)
+        r.raise_for_status()
+        raw_html = r.text
+        soup = BeautifulSoup(raw_html, "html.parser")
+        has_logo = _seller_has_logo(soup)
+        if has_logo:
+            has_inventory = '"type":"inventory"' in raw_html
+            package = "premium" if has_inventory else "pluss"
+        else:
+            package = "basis"
+    except Exception as e:
+        log(f"    [ERR] ad fetch -> {e}")
+        package = "basis"
 
     if org_name:
-        with _org_locks_lock:
-            lock = _org_locks.setdefault(org_name, threading.Lock())
-    else:
-        lock = threading.Lock()
-
-    with lock:
-        with _cache_lock:
-            if org_name and org_name in _dealer_cache:
-                return _dealer_cache[org_name]
-
-        url = AD_URL.format(finnkode)
-        log(f"    [AD] {url}  ({org_name or 'unknown'})")
-        try:
-            r = _session.get(url, timeout=30)
-            r.raise_for_status()
-            raw_html = r.text
-            soup = BeautifulSoup(raw_html, "html.parser")
-            has_logo = _seller_has_logo(soup)
-            if has_logo:
-                has_inventory = '"type":"inventory"' in raw_html
-                package = "premium" if has_inventory else "pluss"
-            else:
-                package = "basis"
-        except Exception as e:
-            log(f"    [ERR] ad fetch -> {e}")
-            package = "basis"
-
-        if org_name:
-            with _cache_lock:
-                _dealer_cache[org_name] = package
-        return package
+        _dealer_cache[org_name] = package
+    return package
 
 
 
@@ -275,11 +255,9 @@ def scrape_bucket(price_from, price_to) -> tuple[dict, list[dict]]:
     log(f"  Classifying {len(listings)} listings across "
         f"{len({o for _, o in listings})} unique dealers...")
 
-    # Phase 2: classify each listing in parallel; cache makes repeat dealers free
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        packages = list(ex.map(lambda args: classify_dealer(*args), listings))
-
-    for (finnkode, org_name), package in zip(listings, packages):
+    # Phase 2: classify each listing via dealer cache
+    for finnkode, org_name in listings:
+        package = classify_dealer(finnkode, org_name)
         counts[package] += 1
         debug_rows.append({
             "price_bracket": label,
