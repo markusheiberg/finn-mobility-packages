@@ -1,6 +1,7 @@
 import math
 import random
 import re
+import time
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -68,6 +69,7 @@ def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
     try:
         r = _session.get(url, timeout=30)
         r.raise_for_status()
+        time.sleep(0.05)
     except Exception as e:
         log(f"  [ERR] {label} page=1 -> {e}")
         return []
@@ -131,6 +133,7 @@ def _fetch_page(label, page, price_from, price_to):
     try:
         r = _session.get(url, timeout=30)
         r.raise_for_status()
+        time.sleep(0.05)
         return BeautifulSoup(r.text, "html.parser")
     except Exception as e:
         log(f"  [ERR] {label} page={page} -> {e}")
@@ -216,6 +219,7 @@ def classify_dealer(finnkode: str, org_name: str) -> str:
 
     if org_name:
         _dealer_cache[org_name] = package
+    time.sleep(0.05)
     return package
 
 
@@ -313,6 +317,7 @@ def main():
 
         counts, debug_rows = scrape_bucket(p_from, p_to)
         all_debug.extend(debug_rows)
+        time.sleep(0.1)
 
         summary_rows.append({
             "date_collected": today_str,
