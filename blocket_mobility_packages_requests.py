@@ -135,13 +135,13 @@ def _fetch_page(label, page, price_from, price_to):
 
 
 def _parse_total_count(soup) -> int | None:
-    """Extract total listing count shown as 'X träffar' or 'X annonser' on the search page."""
+    """Extract total listing count shown as 'X resultat' on the search page."""
     for tag in soup.find_all(["h1", "h2", "span", "p", "div"]):
         text = tag.get_text(" ", strip=True)
-        m = re.search(r"([\d\s\xa0]+)\s*(träffar|annonser|treff)", text)
+        m = re.search(r"([\d\s\xa0 ]+)\s*(resultat|träffar|annonser|treff)", text)
         if m:
             try:
-                return int(re.sub(r"\s", "", m.group(1)))
+                return int(re.sub(r"[\s\xa0 ]", "", m.group(1)))
             except ValueError:
                 pass
     return None
