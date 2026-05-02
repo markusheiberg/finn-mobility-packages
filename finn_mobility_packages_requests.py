@@ -101,7 +101,13 @@ def get_finnkodes_for_bucket(
 def classify_ad(finnkode: str) -> tuple[str, dict]:
     url = AD_URL.format(finnkode=finnkode)
     try:
-        soup = get(url)
+        t0 = time.time()
+        r = _session.get(url, timeout=30)
+        elapsed = time.time() - t0
+        kb = len(r.content) / 1024
+        print(f"  [AD] {finnkode}  status={r.status_code}  {elapsed:.2f}s  {kb:.0f}KB")
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
     except Exception as e:
         print(f"  [ERR] {finnkode}: {e}")
         return "error", {"finnkode": finnkode, "package": "error", "error": str(e)}

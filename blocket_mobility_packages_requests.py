@@ -94,7 +94,11 @@ def get_blocketkodes_for_bucket(
 def classify_ad(blocketkod: str) -> tuple[str, dict]:
     url = AD_URL.format(blocketkod=blocketkod)
     try:
+        t0 = time.time()
         r = _session.get(url, timeout=30)
+        elapsed = time.time() - t0
+        kb = len(r.content) / 1024
+        print(f"  [AD] {blocketkod}  status={r.status_code}  {elapsed:.2f}s  {kb:.0f}KB")
         r.raise_for_status()
         raw_html = r.text
         if '"type":"inventory"' in raw_html:
