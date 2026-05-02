@@ -1,7 +1,6 @@
 import math
 import random
 import re
-import time
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -218,7 +217,6 @@ def classify_dealer(finnkode: str, org_name: str) -> str:
 
     if org_name:
         _dealer_cache[org_name] = package
-    time.sleep(0.1)
     return package
 
 
