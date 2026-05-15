@@ -114,6 +114,26 @@ One row appended per run to `vend-scrapers-v2.market_scraper.mobility_packages`:
 - Scheduler: `mobility-packages-2350-sunday` (europe-west1, Sundays 23:50 Oslo time)
 - Artifact Registry: `europe-north1-docker.pkg.dev/vend-scrapers-v2/scrapers/mobility-packages`
 
+## CI/CD — GitHub Actions auto-deploy
+
+Push to `main` → GitHub Actions builds and deploys automatically. No manual `gcloud builds submit` needed.
+
+**How it works:**
+- Trigger: push to `main`
+- Auth: Workload Identity Federation (no stored GCP keys)
+- Steps: `docker build` → `docker push` to Artifact Registry → `gcloud run jobs update`
+
+**GCP setup (already done for this project):**
+- Service account: `github-deployer@vend-scrapers-v2.iam.gserviceaccount.com`
+- Roles: `roles/artifactregistry.writer` + `roles/run.developer`
+- Workload Identity Pool: `github-pool` / Provider: `github-provider`
+
+**Gotchas:**
+- Use `docker build` + `docker push` directly — `gcloud builds submit` requires Viewer/Owner role
+- Service account needs `roles/artifactregistry.writer` explicitly for image pushes
+
+**For new repos in the same GCP project:** workflow YAML is copy-paste, just swap image URL and job names. GCP IAM/Workload Identity setup only needs to be repeated if the GCP project changes.
+
 ## Common GCP commands
 
 ### Build and push image
