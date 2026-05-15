@@ -93,6 +93,10 @@ One row appended per run to `vend-scrapers-v2.market_scraper.mobility_packages`:
 3. Randomly select pages across the full page range to avoid recency bias
 4. Trim collected listings to exactly `target` via random subsample if needed
 
+**Open question — blocket speed:** Blocket is slower than finn because 25k SEK steps = 41 wide buckets with many listings each (vs finn's 101 narrow buckets). Two options if speed becomes an issue:
+- Option A: Reduce step to 10k SEK → ~101 buckets, fewer listings per bucket
+- Option B: Reduce `SAMPLE_FRACTION` from 0.05 to 0.02 → 2% sample instead of 5%
+
 ## Key implementation details
 
 - **Global dealer cache** (`org_name → package`): each dealer is classified only once across all price buckets
@@ -141,6 +145,10 @@ bq query --use_legacy_sql=false 'SELECT * FROM `vend-scrapers-v2.market_scraper.
 ```bash
 gcloud scheduler jobs list --location europe-west1
 ```
+
+## Artifact Registry cleanup policy
+
+Both `europe-north1` and `europe-west1` scrapers repositories have a cleanup policy set to keep the 2 most recent image versions. Old images are deleted automatically — no manual cleanup needed.
 
 ## Dependencies
 
