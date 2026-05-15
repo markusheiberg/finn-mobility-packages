@@ -1,10 +1,11 @@
 import math
+import os
 import random
 import re
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
-from datetime import date
+from datetime import datetime
 
 SEARCH_URL = "https://www.finn.no/mobility/search/car"
 AD_URL = "https://www.finn.no/mobility/item/{}"
@@ -19,8 +20,7 @@ HEADERS = {
 }
 
 SAMPLE_FRACTION = 0.05
-OUTPUT_CSV = "finn_mobility_packages_summary.csv"
-DEBUG_CSV = "finn_mobility_debug.csv"
+RUNS_DIR = "runs"
 
 # Shared HTTP session: reuses TCP/TLS connections across requests.
 _session = requests.Session()
@@ -297,7 +297,13 @@ def bucket_label(p_from, p_to):
 # ---------------------------------------------------------------------------
 
 def main():
-    today_str = date.today().isoformat()
+    run_dt = datetime.now()
+    today_str = run_dt.date().isoformat()
+    ts = run_dt.strftime("%Y-%m-%d_%H-%M-%S")
+    os.makedirs(RUNS_DIR, exist_ok=True)
+    output_csv = os.path.join(RUNS_DIR, f"finn_mobility_packages_summary_{ts}.csv")
+    debug_csv = os.path.join(RUNS_DIR, f"finn_mobility_debug_{ts}.csv")
+
     buckets = price_buckets()
     log(f"Starting scrape: {len(buckets)} buckets (10k NOK steps, cap=1M)")
     log(f"Strategy: collect finnkodes from search pages, "
@@ -324,13 +330,13 @@ def main():
         })
 
     df = pd.DataFrame(summary_rows)
-    df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
-    log(f"\n[CSV] Summary -> {OUTPUT_CSV}  ({len(df)} rows)")
+    df.to_csv(output_csv, index=False, encoding="utf-8-sig")
+    log(f"\n[CSV] Summary -> {output_csv}  ({len(df)} rows)")
     log(df.to_string())
 
     if all_debug:
-        pd.DataFrame(all_debug).to_csv(DEBUG_CSV, index=False, encoding="utf-8-sig")
-        log(f"[CSV] Debug   -> {DEBUG_CSV}  ({len(all_debug)} rows)")
+        pd.DataFrame(all_debug).to_csv(debug_csv, index=False, encoding="utf-8-sig")
+        log(f"[CSV] Debug   -> {debug_csv}  ({len(all_debug)} rows)")
 
     log(f"\nDealer cache final size: {len(_dealer_cache)}")
 
