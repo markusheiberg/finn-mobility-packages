@@ -1,0 +1,42 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+env:
+  PROJECT_ID: vend-scrapers-v2
+  REGION: europe-north1
+  IMAGE: europe-north1-docker.pkg.dev/vend-scrapers-v2/scrapers/mobility-packages
+  JOB_NAME: mobility-packages
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/895238155180/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-deployer@vend-scrapers-v2.iam.gserviceaccount.com
+
+      - name: Set up Docker auth
+        run: gcloud auth configure-docker europe-north1-docker.pkg.dev --quiet
+
+      - name: Build and push image
+        run: |
+          docker build -t $IMAGE:$GITHUB_SHA -t $IMAGE:latest .
+          docker push $IMAGE:$GITHUB_SHA
+          docker push $IMAGE:latest
+
+      - name: Update Cloud Run Job
+        run: |
+          gcloud run jobs update $JOB_NAME \
+            --image $IMAGE:$GITHUB_SHA \
+            --region $REGION

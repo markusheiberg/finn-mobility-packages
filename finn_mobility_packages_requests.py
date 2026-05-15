@@ -1,10 +1,12 @@
 import math
+import os
 import random
 import re
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
-from datetime import date
+from datetime import datetime, timezone
+from google.cloud import bigquery
 
 SEARCH_URL = "https://www.finn.no/mobility/search/car"
 AD_URL = "https://www.finn.no/mobility/item/{}"
@@ -19,8 +21,10 @@ HEADERS = {
 }
 
 SAMPLE_FRACTION = 0.05
-OUTPUT_CSV = "finn_mobility_packages_summary.csv"
-DEBUG_CSV = "finn_mobility_debug.csv"
+RUNS_DIR = "runs"
+BQ_PROJECT = "vend-scrapers-v2"
+BQ_DATASET = "market_scraper"
+BQ_TABLE = "mobility_packages"
 
 # Shared HTTP session: reuses TCP/TLS connections across requests.
 _session = requests.Session()
@@ -297,7 +301,13 @@ def bucket_label(p_from, p_to):
 # ---------------------------------------------------------------------------
 
 def main():
-    today_str = date.today().isoformat()
+    run_dt = datetime.now()
+    today_str = run_dt.date().isoformat()
+    ts = run_dt.strftime("%Y-%m-%d_%H-%M-%S")
+    os.makedirs(RUNS_DIR, exist_ok=True)
+    output_csv = os.path.join(RUNS_DIR, f"finn_mobility_packages_summary_{ts}.csv")
+    debug_csv = os.path.join(RUNS_DIR, f"finn_mobility_debug_{ts}.csv")
+
     buckets = price_buckets()
     log(f"Starting scrape: {len(buckets)} buckets (10k NOK steps, cap=1M)")
     log(f"Strategy: collect finnkodes from search pages, "
@@ -324,15 +334,54 @@ def main():
         })
 
     df = pd.DataFrame(summary_rows)
-    df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
-    log(f"\n[CSV] Summary -> {OUTPUT_CSV}  ({len(df)} rows)")
+    df.to_csv(output_csv, index=False, encoding="utf-8-sig")
+    df.to_csv("finn_mobility_packages_summary.csv", index=False, encoding="utf-8-sig")
+    log(f"\n[CSV] Summary -> {output_csv}  ({len(df)} rows)")
     log(df.to_string())
 
     if all_debug:
-        pd.DataFrame(all_debug).to_csv(DEBUG_CSV, index=False, encoding="utf-8-sig")
-        log(f"[CSV] Debug   -> {DEBUG_CSV}  ({len(all_debug)} rows)")
+        pd.DataFrame(all_debug).to_csv(debug_csv, index=False, encoding="utf-8-sig")
+        log(f"[CSV] Debug   -> {debug_csv}  ({len(all_debug)} rows)")
 
+    _write_to_bigquery(run_dt, df)
     log(f"\nDealer cache final size: {len(_dealer_cache)}")
+
+
+def _write_to_bigquery(run_dt: datetime, df: pd.DataFrame):
+    total_premium = int(df["premium_count"].sum())
+    total_pluss = int(df["pluss_count"].sum())
+    total_basis = int(df["basis_count"].sum())
+    total = total_premium + total_pluss + total_basis
+
+    client = bigquery.Client(project=BQ_PROJECT)
+    table_ref = f"{BQ_PROJECT}.{BQ_DATASET}.{BQ_TABLE}"
+
+    client.create_table(
+        bigquery.Table(table_ref, schema=[
+            bigquery.SchemaField("run_timestamp", "TIMESTAMP"),
+            bigquery.SchemaField("site", "STRING"),
+            bigquery.SchemaField("premium_count", "INTEGER"),
+            bigquery.SchemaField("pluss_count", "INTEGER"),
+            bigquery.SchemaField("basis_count", "INTEGER"),
+            bigquery.SchemaField("total_count", "INTEGER"),
+        ]),
+        exists_ok=True,
+    )
+
+    row = [{
+        "run_timestamp": run_dt.astimezone(timezone.utc).isoformat(),
+        "site": "finn",
+        "premium_count": total_premium,
+        "pluss_count": total_pluss,
+        "basis_count": total_basis,
+        "total_count": total,
+    }]
+    errors = client.insert_rows_json(table_ref, row)
+    if errors:
+        log(f"[BQ] Insert errors: {errors}")
+    else:
+        log(f"[BQ] Appended 1 row to {table_ref} "
+            f"(Premium={total_premium} Pluss={total_pluss} Basis={total_basis} Total={total})")
 
 
 def test_run(n=50):
