@@ -132,7 +132,7 @@ Push to `main` → GitHub Actions builds and deploys automatically. No manual `g
 - Use `docker build` + `docker push` directly — `gcloud builds submit` requires Viewer/Owner role
 - Service account needs `roles/artifactregistry.writer` explicitly for image pushes
 
-**For new repos in the same GCP project:** workflow YAML is copy-paste, just swap image URL and job names. GCP IAM/Workload Identity setup only needs to be repeated if the GCP project changes.
+**For new repos in the same GCP project:** workflow YAML is copy-paste, just swap image URL and job names. No Cloud Shell IAM commands needed — the Workload Identity Provider attribute condition is set to `assertion.repository_owner=='markusheiberg'`, so all repos under that GitHub account are trusted automatically.
 
 ## Common GCP commands
 
