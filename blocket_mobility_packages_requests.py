@@ -311,6 +311,7 @@ def main():
 
     df = pd.DataFrame(summary_rows)
     df.to_csv(output_csv, index=False, encoding="utf-8-sig")
+    df.to_csv("blocket_mobility_packages_summary.csv", index=False, encoding="utf-8-sig")
     log(f"\n[CSV] Summary -> {output_csv}  ({len(df)} rows)")
     log(df.to_string())
 
