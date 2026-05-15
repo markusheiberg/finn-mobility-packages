@@ -201,10 +201,10 @@ def classify_dealer(blocketkod: str, org_name: str) -> str:
     try:
         r = _session.get(url, timeout=10)
         r.raise_for_status()
-        raw_html = r.text
-        if '"type":"inventory"' in raw_html:
+        soup = BeautifulSoup(r.text, "html.parser")
+        if soup.find(id="aurora-mobility-inventory-podlet-content"):
             package = "premium"
-        elif '"type":"recommendations"' in raw_html:
+        elif soup.find(id="aurora-mobility-recommendations-podlet-content"):
             package = "basis"
         else:
             package = "pluss"
