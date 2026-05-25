@@ -201,8 +201,10 @@ def classify_dealer(blocketkod: str, org_name: str) -> str:
     try:
         r = _session.get(url, timeout=10)
         r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-        if soup.find(id="aurora-mobility-inventory-podlet-content"):
+        raw_html = r.text
+        soup = BeautifulSoup(raw_html, "html.parser")
+        if '"type":"inventory"' in raw_html:
+            # inventory podlet is JS-rendered, signal appears in raw HTML config
             package = "premium"
         elif soup.find(id="aurora-mobility-recommendations-podlet-content"):
             package = "basis"
