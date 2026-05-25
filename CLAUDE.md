@@ -29,7 +29,7 @@ Detection is based on the GAM advertising targeting JSON embedded in the static 
 
 | Package | Signal in static HTML | Section shown |
 |---------|----------------------|---------------|
-| **Premium** | `"feature_package":["PREMIUM"]` in raw HTML, **or** `"type":"inventory"` (secondary) | "Flera annonser från oss" (own inventory) |
+| **Premium** | `"feature_package":["PREMIUM"]` in raw HTML | "Flera annonser från oss" (own inventory) |
 | **Pluss** | `"feature_package":["PLUS"]` in raw HTML | No recommendations section |
 | **Basis** | Neither Premium nor Pluss signal | "Mer som det här" (other dealers) |
 

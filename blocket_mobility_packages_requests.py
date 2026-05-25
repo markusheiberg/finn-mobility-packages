@@ -203,11 +203,11 @@ def classify_dealer(blocketkod: str, org_name: str) -> str:
         r.raise_for_status()
         raw_html = r.text
         soup = BeautifulSoup(raw_html, "html.parser")
-        if '"feature_package":["PREMIUM"]' in raw_html or '"type":"inventory"' in raw_html:
-            # GAM targeting confirms Premium; inventory podlet type is a secondary signal
+        if '"feature_package":["PREMIUM"]' in raw_html:
+            # GAM targeting confirms Premium dealer
             package = "premium"
         elif '"feature_package":["PLUS"]' in raw_html:
-            # GAM targeting explicitly marks this dealer as Pluss
+            # GAM targeting confirms Pluss dealer
             package = "pluss"
         else:
             # No premium or pluss signal → basis
