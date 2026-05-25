@@ -80,8 +80,19 @@ def main():
     print(f"    \"type\":\"inventory\"       = {inv_count}x")
     print(f"    \"type\":\"recommendations\" = {rec_count}x")
 
+    # --- Dealer logo images ---
+    print("\n[4] All <img> tags (looking for dealer logo):")
+    for img in soup.find_all("img"):
+        src = img.get("src", "")
+        alt = img.get("alt", "")
+        cls = " ".join(img.get("class", []))
+        if src and not src.startswith("data:"):
+            print(f"    src={src}")
+            if alt:
+                print(f"         alt={alt}")
+
     # --- Classification result ---
-    print(f"\n[4] Classification:")
+    print(f"\n[5] Classification (current logic):")
     if '"feature_package":["PREMIUM"]' in raw:
         result = "premium"
     elif '"feature_package":["PLUS"]' in raw:
