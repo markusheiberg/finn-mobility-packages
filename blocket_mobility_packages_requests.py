@@ -203,14 +203,22 @@ def classify_dealer(blocketkod: str, org_name: str) -> str:
         r.raise_for_status()
         raw_html = r.text
         soup = BeautifulSoup(raw_html, "html.parser")
-        if '"feature_package":["PREMIUM"]' in raw_html:
-            # GAM targeting confirms Premium dealer
+        recs_div = soup.find(id="aurora-mobility-recommendations-podlet-content")
+        ext = ""
+        if recs_div:
+            ext = recs_div.get("externalprops") or recs_div.get("externalProps") or ""
+        has_logo = bool(soup.find(
+            "img", src=re.compile(r"i\.blocketcdn\.se/pictures/stores/")
+        ))
+
+        if '"type":"inventory"' in ext:
+            # Same div, type=inventory → dealer's own inventory ("Flera annonser från oss")
             package = "premium"
-        elif '"feature_package":["PLUS"]' in raw_html:
-            # GAM targeting confirms Pluss dealer
+        elif has_logo:
+            # Logo present + type=recommendations → Pluss ("Mer som det här")
             package = "pluss"
         else:
-            # No premium or pluss signal → basis
+            # No logo → Basis
             package = "basis"
     except Exception as e:
         log(f"    [ERR] ad fetch -> {e}")

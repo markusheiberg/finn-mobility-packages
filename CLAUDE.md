@@ -25,17 +25,17 @@ Premium detection: `"type":"inventory"` appears in the raw HTML inside the Auror
 
 ### blocket.se
 
-Detection is based on the GAM advertising targeting JSON embedded in the static HTML. Blocket sets `"feature_package"` in the page's ad-targeting state for every listing, making it the most reliable signal.
+Detection mirrors finn.no: dealer logo + `externalprops` type on the Aurora podlet div.
 
-| Package | Signal in static HTML | Section shown |
-|---------|----------------------|---------------|
-| **Premium** | `"feature_package":["PREMIUM"]` in raw HTML | "Flera annonser från oss" (own inventory) |
-| **Pluss** | `"feature_package":["PLUS"]` in raw HTML | No recommendations section |
-| **Basis** | Neither Premium nor Pluss signal | "Mer som det här" (other dealers) |
+| Package | `aurora-mobility-recommendations-podlet-content` `type` | Logo at `i.blocketcdn.se/pictures/stores/` | Section shown |
+|---------|--------------------------------------------------------|--------------------------------------------|---------------|
+| **Premium** | `inventory` | ✓ | "Flera annonser från oss" (own inventory) |
+| **Pluss** | `recommendations` | ✓ | "Mer som det här" (other dealers) |
+| **Basis** | `recommendations` | ✗ | "Mer som det här" (other dealers) |
 
-The `aurora-mobility-recommendations-podlet-content` div is present for **both** Pluss and Basis listings, so it cannot be used to distinguish them. The `feature_package` key appears in the prebid/GAM targeting JSON (e.g. `{"key":"feature_package","value":["PLUS"]}`).
+All three packages use the **same div** (`aurora-mobility-recommendations-podlet-content`). The `type` field inside `externalprops` attribute distinguishes Premium from Pluss/Basis. The dealer logo (`i.blocketcdn.se/pictures/stores/`) distinguishes Pluss from Basis.
 
-Logos are not a reliable signal on blocket.se.
+The `feature_package` GAM targeting key is **not present** in the static HTML.
 
 ## Scripts
 
