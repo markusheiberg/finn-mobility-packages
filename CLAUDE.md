@@ -25,15 +25,17 @@ Premium detection: `"type":"inventory"` appears in the raw HTML inside the Auror
 
 ### blocket.se
 
-| Package | Signal in static HTML | Section shown |
-|---------|----------------------|---------------|
-| **Premium** | `id="aurora-mobility-inventory-podlet-content"` div present | "Flera annonser från oss" (own inventory) |
-| **Basis** | `id="aurora-mobility-recommendations-podlet-content"` div present | "Mer som det här" (other dealers) |
-| **Pluss** | Neither div present | No recommendations section |
+Detection mirrors finn.no: dealer logo + `externalprops` type on the Aurora podlet div.
 
-Logos are not a reliable signal on blocket.se. Note: Pluss appears to be unused by Swedish car dealers in practice (consistently 0).
+| Package | `aurora-mobility-recommendations-podlet-content` `type` | Logo at `i.blocketcdn.se/pictures/stores/` | Section shown |
+|---------|--------------------------------------------------------|--------------------------------------------|---------------|
+| **Premium** | `inventory` | ✓ | "Flera annonser från oss" (own inventory) |
+| **Pluss** | `recommendations` | ✓ | "Mer som det här" (other dealers) |
+| **Basis** | `recommendations` | ✗ | "Mer som det här" (other dealers) |
 
-Detection uses specific Aurora div IDs (not broad string search) to avoid false matches in analytics/script tags. The attribute is `externalProps` (capital P).
+All three packages use the **same div** (`aurora-mobility-recommendations-podlet-content`). The `type` field inside `externalprops` attribute distinguishes Premium from Pluss/Basis. The dealer logo (`i.blocketcdn.se/pictures/stores/`) distinguishes Pluss from Basis.
+
+The `feature_package` GAM targeting key is **not present** in the static HTML.
 
 ## Scripts
 
@@ -132,7 +134,7 @@ Push to `main` → GitHub Actions builds and deploys automatically. No manual `g
 - Use `docker build` + `docker push` directly — `gcloud builds submit` requires Viewer/Owner role
 - Service account needs `roles/artifactregistry.writer` explicitly for image pushes
 
-**For new repos in the same GCP project:** workflow YAML is copy-paste, just swap image URL and job names. GCP IAM/Workload Identity setup only needs to be repeated if the GCP project changes.
+**For new repos in the same GCP project:** workflow YAML is copy-paste, just swap image URL and job names. No Cloud Shell IAM commands needed — the Workload Identity Provider attribute condition is set to `assertion.repository_owner=='markusheiberg'`, so all repos under that GitHub account are trusted automatically.
 
 ## Common GCP commands
 

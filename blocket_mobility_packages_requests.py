@@ -201,13 +201,25 @@ def classify_dealer(blocketkod: str, org_name: str) -> str:
     try:
         r = _session.get(url, timeout=10)
         r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-        if soup.find(id="aurora-mobility-inventory-podlet-content"):
+        raw_html = r.text
+        soup = BeautifulSoup(raw_html, "html.parser")
+        recs_div = soup.find(id="aurora-mobility-recommendations-podlet-content")
+        ext = ""
+        if recs_div:
+            ext = recs_div.get("externalprops") or recs_div.get("externalProps") or ""
+        has_logo = bool(soup.find(
+            "img", src=re.compile(r"i\.blocketcdn\.se/pictures/stores/")
+        ))
+
+        if '"type":"inventory"' in ext:
+            # Same div, type=inventory → dealer's own inventory ("Flera annonser från oss")
             package = "premium"
-        elif soup.find(id="aurora-mobility-recommendations-podlet-content"):
-            package = "basis"
-        else:
+        elif has_logo:
+            # Logo present + type=recommendations → Pluss ("Mer som det här")
             package = "pluss"
+        else:
+            # No logo → Basis
+            package = "basis"
     except Exception as e:
         log(f"    [ERR] ad fetch -> {e}")
         return None  # don't cache errors, exclude from results
@@ -360,34 +372,57 @@ def _write_to_bigquery(run_dt: datetime, df: pd.DataFrame):
             f"(Premium={total_premium} Pluss={total_pluss} Basis={total_basis} Total={total})")
 
 
-def test_run(n=50):
-    """Fetch the first page of results (no price filter) and classify n listings."""
-    log(f"=== TEST RUN: classifying first {n} listings ===")
-    url = f"{SEARCH_URL}?dealer_segment=2"
-    log(f"[SEARCH] {url}")
-    r = _session.get(url, timeout=30)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
+def test_run(n=200):
+    """
+    Fetch multiple pages of results (no price filter) and classify up to n listings.
+    Pages are fetched sequentially until n listings are collected or pages run out.
+    """
+    log(f"=== TEST RUN: classifying up to {n} listings ===")
 
     listings = []
-    seen = set()
-    for art in soup.find_all("article"):
-        fk, org = _parse_article(art)
-        if fk and fk not in seen:
-            seen.add(fk)
-            listings.append((fk, org))
-        if len(listings) >= n:
+    seen: set[str] = set()
+    page = 1
+
+    while len(listings) < n:
+        url = f"{SEARCH_URL}?dealer_segment=2" + (f"&page={page}" if page > 1 else "")
+        log(f"[SEARCH] {url}")
+        try:
+            r = _session.get(url, timeout=30)
+            r.raise_for_status()
+        except Exception as e:
+            log(f"[ERR] page={page} -> {e}")
+            break
+        soup = BeautifulSoup(r.text, "html.parser")
+        articles = soup.find_all("article")
+        if not articles:
+            log(f"[STOP] no articles on page {page}")
             break
 
-    log(f"Found {len(listings)} listings on page 1\n")
+        new = 0
+        for art in articles:
+            fk, org = _parse_article(art)
+            if fk and fk not in seen:
+                seen.add(fk)
+                listings.append((fk, org))
+                new += 1
+            if len(listings) >= n:
+                break
+
+        log(f"  page={page} new={new} total={len(listings)}")
+        page += 1
+
+    log(f"\nClassifying {len(listings)} listings...\n")
 
     counts = {"premium": 0, "pluss": 0, "basis": 0}
     for fk, org in listings:
         pkg = classify_dealer(fk, org)
+        if pkg is None:
+            continue
         counts[pkg] += 1
         log(f"  {fk:>12}  {pkg:<8}  {org}")
 
-    log(f"\nResult: Premium={counts['premium']}  Pluss={counts['pluss']}  Basis={counts['basis']}")
+    total = sum(counts.values())
+    log(f"\nResult: Premium={counts['premium']}  Pluss={counts['pluss']}  Basis={counts['basis']}  Total={total}")
 
 
 if __name__ == "__main__":
