@@ -25,15 +25,17 @@ Premium detection: `"type":"inventory"` appears in the raw HTML inside the Auror
 
 ### blocket.se
 
+Detection is based on the GAM advertising targeting JSON embedded in the static HTML. Blocket sets `"feature_package"` in the page's ad-targeting state for every listing, making it the most reliable signal.
+
 | Package | Signal in static HTML | Section shown |
 |---------|----------------------|---------------|
-| **Premium** | `id="aurora-mobility-inventory-podlet-content"` div present | "Flera annonser från oss" (own inventory) |
-| **Basis** | `id="aurora-mobility-recommendations-podlet-content"` div present | "Mer som det här" (other dealers) |
-| **Pluss** | Neither div present | No recommendations section |
+| **Premium** | `"feature_package":["PREMIUM"]` in raw HTML, **or** `"type":"inventory"` (secondary) | "Flera annonser från oss" (own inventory) |
+| **Pluss** | `"feature_package":["PLUS"]` in raw HTML | No recommendations section |
+| **Basis** | Neither Premium nor Pluss signal | "Mer som det här" (other dealers) |
 
-Logos are not a reliable signal on blocket.se. Note: Pluss appears to be unused by Swedish car dealers in practice (consistently 0).
+The `aurora-mobility-recommendations-podlet-content` div is present for **both** Pluss and Basis listings, so it cannot be used to distinguish them. The `feature_package` key appears in the prebid/GAM targeting JSON (e.g. `{"key":"feature_package","value":["PLUS"]}`).
 
-Detection uses specific Aurora div IDs (not broad string search) to avoid false matches in analytics/script tags. The attribute is `externalProps` (capital P).
+Logos are not a reliable signal on blocket.se.
 
 ## Scripts
 
