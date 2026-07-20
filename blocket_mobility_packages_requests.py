@@ -21,6 +21,7 @@ HEADERS = {
 }
 
 SAMPLE_FRACTION = 0.10
+MAX_PAGES = 50  # blocket caps pagination at page 50; newest listings come first
 RUNS_DIR = "runs"
 BQ_PROJECT = "vend-scrapers-v2"
 BQ_DATASET = "market_scraper"
@@ -62,7 +63,7 @@ def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
     """
     Sample 10% of listings for this price bucket from randomly chosen pages.
     Page 1 is always fetched first to get the total count; remaining pages
-    are drawn at random across the full page range to avoid recency bias.
+    are drawn at random from the first MAX_PAGES pages (newest listings).
     """
     label = bucket_label(price_from, price_to)
 
@@ -88,9 +89,14 @@ def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
         log(f"  [WARN] {label} could not parse total count, using page 1 only")
         total = page_size
 
-    total_pages = min(math.ceil(total / page_size), 50)  # blocket caps at page 50
+    total_pages = min(math.ceil(total / page_size), MAX_PAGES)
     target = math.ceil(total * SAMPLE_FRACTION)
     pages_needed = math.ceil(target / page_size)
+
+    max_reachable = total_pages * page_size
+    if target > max_reachable:
+        log(f"  [WARN] {label} target={target} exceeds ~{max_reachable} listings "
+            f"reachable within the first {total_pages} pages; sample will be capped")
 
     if pages_needed >= total_pages:
         selected_pages = list(range(1, total_pages + 1))
@@ -118,6 +124,10 @@ def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
                 new += 1
 
         log(f"  [PAGE] {label} page={page} new={new} total={len(listings)}")
+
+    if len(listings) < target:
+        log(f"  [WARN] {label} collected {len(listings)} of target={target} "
+            f"(page errors, duplicates, or page cap)")
 
     if len(listings) > target:
         collected = len(listings)
@@ -185,7 +195,7 @@ def _parse_article(article) -> tuple[str | None, str]:
 # Phase 2: classify a dealer by visiting one individual ad page
 # ---------------------------------------------------------------------------
 
-def classify_dealer(blocketkod: str, org_name: str) -> str:
+def classify_dealer(blocketkod: str, org_name: str) -> str | None:
     """
     Fetch the individual ad page and determine package:
       premium  = "type":"inventory" in externalprops  -> "Flera annonser från oss"

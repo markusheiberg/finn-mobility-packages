@@ -92,8 +92,10 @@ One row appended per run to `vend-scrapers-v2.market_scraper.mobility_packages`:
 
 1. Fetch page 1 of each bucket → parse total listing count
 2. Target = `ceil(total × 0.10)` (10%)
-3. Randomly select pages across the full page range to avoid recency bias
+3. Randomly select pages from the **first 50 pages** (`MAX_PAGES`) of each bucket — both sites cap pagination, and newest listings come first, which is what we want
 4. Trim collected listings to exactly `target` via random subsample if needed
+
+Guards: a `[WARN]` is logged when the target exceeds what's reachable within the page cap, and when a bucket collects fewer listings than its target. Failed ad-page fetches are excluded from counts (not classified as basis) on both sites, so throttling can't skew the package distribution.
 
 **Open question — blocket speed:** Blocket is slower than finn because 25k SEK steps = 41 wide buckets with many listings each (vs finn's 101 narrow buckets). Two options if speed becomes an issue:
 - Option A: Reduce step to 10k SEK → ~101 buckets, fewer listings per bucket

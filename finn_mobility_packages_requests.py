@@ -21,6 +21,7 @@ HEADERS = {
 }
 
 SAMPLE_FRACTION = 0.10
+MAX_PAGES = 50  # only sample the newest listings; deep pages may not exist anyway
 RUNS_DIR = "runs"
 BQ_PROJECT = "vend-scrapers-v2"
 BQ_DATASET = "market_scraper"
@@ -62,7 +63,7 @@ def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
     """
     Sample 10% of listings for this price bucket from randomly chosen pages.
     Page 1 is always fetched first to get the total count; remaining pages
-    are drawn at random across the full page range to avoid recency bias.
+    are drawn at random from the first MAX_PAGES pages (newest listings).
     """
     label = bucket_label(price_from, price_to)
 
@@ -89,9 +90,14 @@ def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
         log(f"  [WARN] {label} could not parse total count, using page 1 only")
         total = page_size
 
-    total_pages = math.ceil(total / page_size)
+    total_pages = min(math.ceil(total / page_size), MAX_PAGES)
     target = math.ceil(total * SAMPLE_FRACTION)
     pages_needed = math.ceil(target / page_size)
+
+    max_reachable = total_pages * page_size
+    if target > max_reachable:
+        log(f"  [WARN] {label} target={target} exceeds ~{max_reachable} listings "
+            f"reachable within the first {total_pages} pages; sample will be capped")
 
     if pages_needed >= total_pages:
         selected_pages = list(range(1, total_pages + 1))
@@ -120,6 +126,10 @@ def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
                 new += 1
 
         log(f"  [PAGE] {label} page={page} new={new} total={len(listings)}")
+
+    if len(listings) < target:
+        log(f"  [WARN] {label} collected {len(listings)} of target={target} "
+            f"(page errors, duplicates, or page cap)")
 
     # Trim to target by random subsampling to remove within-page ordering bias
     if len(listings) > target:
@@ -191,13 +201,14 @@ def _parse_article(article) -> tuple[str | None, str]:
 # Phase 2: classify a dealer by visiting one individual ad page
 # ---------------------------------------------------------------------------
 
-def classify_dealer(finnkode: str, org_name: str) -> str:
+def classify_dealer(finnkode: str, org_name: str) -> str | None:
     """
     Fetch the individual ad page and determine package:
       premium  = logo img present AND "type":"inventory" in static HTML
       pluss    = logo img present AND no inventory podlet
       basis    = no logo img in seller section
     Result is cached by org_name so each dealer is fetched only once.
+    Returns None on fetch errors so throttling doesn't inflate basis counts.
     """
     if org_name and org_name in _dealer_cache:
         return _dealer_cache[org_name]
@@ -217,7 +228,7 @@ def classify_dealer(finnkode: str, org_name: str) -> str:
             package = "basis"
     except Exception as e:
         log(f"    [ERR] ad fetch -> {e}")
-        package = "basis"
+        return None  # don't cache errors, exclude from results
 
     if org_name:
         _dealer_cache[org_name] = package
@@ -261,6 +272,8 @@ def scrape_bucket(price_from, price_to) -> tuple[dict, list[dict]]:
     # Phase 2: classify each listing via dealer cache
     for finnkode, org_name in listings:
         package = classify_dealer(finnkode, org_name)
+        if package is None:
+            continue
         counts[package] += 1
         debug_rows.append({
             "price_bracket": label,
@@ -408,6 +421,8 @@ def test_run(n=50):
     counts = {"premium": 0, "pluss": 0, "basis": 0}
     for fk, org in listings:
         pkg = classify_dealer(fk, org)
+        if pkg is None:
+            continue
         counts[pkg] += 1
         log(f"  {fk:>12}  {pkg:<8}  {org}")
 
