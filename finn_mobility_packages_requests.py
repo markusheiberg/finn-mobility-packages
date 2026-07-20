@@ -20,7 +20,7 @@ HEADERS = {
     "Accept-Language": "nb-NO,nb;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
-SAMPLE_FRACTION = 0.05
+SAMPLE_FRACTION = 0.10
 RUNS_DIR = "runs"
 BQ_PROJECT = "vend-scrapers-v2"
 BQ_DATASET = "market_scraper"
@@ -60,7 +60,7 @@ def search_url(page, price_from, price_to):
 
 def collect_listings(price_from, price_to) -> list[tuple[str, str]]:
     """
-    Sample 5% of listings for this price bucket from randomly chosen pages.
+    Sample 10% of listings for this price bucket from randomly chosen pages.
     Page 1 is always fetched first to get the total count; remaining pages
     are drawn at random across the full page range to avoid recency bias.
     """

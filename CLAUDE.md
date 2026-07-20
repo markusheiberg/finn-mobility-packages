@@ -7,7 +7,7 @@ Scrapers that classify car dealer listings by package (Basis / Pluss / Premium) 
 - **finn.no**: Scrapes `https://www.finn.no/mobility/search/car?dealer_segment=1&dealer_segment=2` across 101 price buckets (10k NOK steps from 0–1M NOK, then open-ended)
 - **blocket.se**: Scrapes `https://www.blocket.se/mobility/search/car?dealer_segment=2` across 41 price buckets (25k SEK steps from 0–1M SEK, then open-ended)
 
-For each bucket it samples 5% of listings from randomly selected pages, classifies each dealer, and writes CSVs + one summary row to BigQuery.
+For each bucket it samples 10% of listings from randomly selected pages, classifies each dealer, and writes CSVs + one summary row to BigQuery.
 
 ## Package classification rules
 
@@ -91,13 +91,13 @@ One row appended per run to `vend-scrapers-v2.market_scraper.mobility_packages`:
 ## Sampling strategy
 
 1. Fetch page 1 of each bucket → parse total listing count
-2. Target = `ceil(total × 0.05)` (5%)
+2. Target = `ceil(total × 0.10)` (10%)
 3. Randomly select pages across the full page range to avoid recency bias
 4. Trim collected listings to exactly `target` via random subsample if needed
 
 **Open question — blocket speed:** Blocket is slower than finn because 25k SEK steps = 41 wide buckets with many listings each (vs finn's 101 narrow buckets). Two options if speed becomes an issue:
 - Option A: Reduce step to 10k SEK → ~101 buckets, fewer listings per bucket
-- Option B: Reduce `SAMPLE_FRACTION` from 0.05 to 0.02 → 2% sample instead of 5%
+- Option B: Reduce `SAMPLE_FRACTION` from 0.10 to a lower value → smaller sample per bucket
 
 ## Key implementation details
 
