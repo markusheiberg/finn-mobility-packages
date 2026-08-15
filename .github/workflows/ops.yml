@@ -1,55 +1,41 @@
-name: Ops — run GCP commands on demand
+name: Ops
 
-# Bounded remote control for GCP, so debugging does not require Cloud Shell.
-# Everything this prints is readable from the workflow log, including by Claude
-# Code via the GitHub API (actions_run_trigger + get_job_logs) — which is the
-# point: the Claude Code sandbox has no gcloud/bq and cannot reach GCP.
+# GCP on demand, from a fixed menu. Everything a step prints is readable by
+# Claude Code via the workflow job log — that is the return path from GCP.
 #
-# Deliberately a FIXED MENU of actions rather than an arbitrary command input.
-# A free-form "run this gcloud command" box would turn repo write access into
-# arbitrary control of the GCP project; these actions are all read-only except
-# the explicit job run. When something new is needed, add a NAMED action.
-#
-# No extra IAM needed — github-deployer already holds logging.viewer (reads)
-# and run.admin (executes jobs) from its use in vend-scraper-v2.
+# Keep it a fixed menu: a free-form "run any gcloud command" input would make
+# repo write access equivalent to full control of the GCP project. When
+# something new is needed, add a *named action*.
 
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: What to do
-        required: true
-        default: logs
+        description: 'What to do'
         type: choice
+        required: true
         options:
-          - logs             # recent scraper output
-          - warns            # only [WARN]/[ERR] lines, last 30 days
-          - run-scraper      # execute the weekly scrape job now (writes to BigQuery)
-          - probe-finn       # classify ~20 live finn listings from the runner (no writes)
-          - probe-blocket    # classify ~20 live blocket listings from the runner (no writes)
-          - check-deploy     # what image the job runs + recent execution history
-      limit:
-        description: Log lines to fetch (logs/warns only)
+          - logs
+          - check-deploy
+          - bq-tail
+          - run-scraper
+      lines:
+        description: 'Log lines to fetch (logs action)'
         required: false
-        default: "200"
-        type: string
+        default: '300'
 
-concurrency:
-  group: ops
-  cancel-in-progress: false
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: vend-scrapers-v2
+  REGION: europe-north1
+  JOB_NAME: mobility-packages
 
 jobs:
   ops:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-
-    env:
-      PROJECT: vend-scrapers-v2
-      REGION: europe-north1
-      JOB: mobility-packages
-
     steps:
       - uses: actions/checkout@v4
 
@@ -60,85 +46,44 @@ jobs:
           service_account: github-deployer@vend-scrapers-v2.iam.gserviceaccount.com
 
       - uses: google-github-actions/setup-gcloud@v2
-        if: inputs.action != 'probe-finn' && inputs.action != 'probe-blocket'
 
-      - name: Recent scraper logs
+      # Recent job output, oldest first (gcloud returns newest first).
+      - name: logs
         if: inputs.action == 'logs'
-        # freshness=8d because the job is weekly (Sundays 23:50 Oslo) — 2d would
-        # usually return nothing.
         run: |
           gcloud logging read \
-            "resource.type=cloud_run_job AND resource.labels.job_name=${JOB}" \
-            --limit "${{ inputs.limit }}" --freshness=8d \
-            --format "table(timestamp,textPayload)" --project "${PROJECT}"
+            'resource.type="cloud_run_job" AND resource.labels.job_name="'"$JOB_NAME"'"' \
+            --project="$PROJECT_ID" \
+            --limit="${{ inputs.lines }}" \
+            --format='value(timestamp,textPayload)' \
+            --freshness=30d | tac
 
-      - name: Recent [WARN] and [ERR] lines
-        if: inputs.action == 'warns'
-        # textPayload=~ is a regex match; brackets escaped so [WARN] is matched
-        # literally rather than tokenised. Prints CLEAN when nothing matched, so
-        # silence is never ambiguous.
-        run: |
-          OUT="$(gcloud logging read \
-            "resource.type=cloud_run_job AND resource.labels.job_name=${JOB} AND textPayload=~\"\\[WARN\\]|\\[ERR\\]\"" \
-            --limit "${{ inputs.limit }}" --freshness=30d \
-            --format "table(timestamp,textPayload)" --project "${PROJECT}" || true)"
-          if [ -z "${OUT}" ]; then
-            echo "CLEAN — no [WARN]/[ERR] lines in the last 30 days."
-          else
-            echo "${OUT}"
-          fi
-
-      - name: Run the scraper now
-        if: inputs.action == 'run-scraper'
-        # Writes one real row per site to mobility_packages, so a midweek manual
-        # run adds an extra point to the weekly series. Harmless but visible —
-        # consumers should read the latest row per week, not assume one row/week.
-        # The full scrape can take a while; --wait blocks until it finishes.
-        # Afterwards print only the signal lines — the full log is thousands of
-        # per-listing lines.
-        run: |
-          gcloud run jobs execute "${JOB}" \
-            --region "${REGION}" --project "${PROJECT}" --wait
-          echo "=== output (signal lines only — use the logs action for more) ==="
-          gcloud logging read \
-            "resource.type=cloud_run_job AND resource.labels.job_name=${JOB} AND textPayload=~\"\\[BQ\\]|\\[WARN\\]|\\[ERR\\]|Starting|Done\"" \
-            --limit 300 --freshness=6h \
-            --format "table(timestamp,textPayload)" --project "${PROJECT}"
-
-      - name: Probe finn classification against the live site (no writes)
-        if: inputs.action == 'probe-finn'
-        # Runs the scraper's --test mode from the runner, which CAN reach
-        # finn.no — the Claude Code sandbox cannot. Classifies ~20 listings and
-        # prints the per-listing package result. Touches no BigQuery and no
-        # Cloud Run job, so it is safe any time and is the way to validate a
-        # detection change BEFORE deploying it.
-        run: |
-          pip install --quiet -r requirements.txt
-          python3 finn_mobility_packages_requests.py --test 20
-
-      - name: Probe blocket classification against the live site (no writes)
-        if: inputs.action == 'probe-blocket'
-        run: |
-          pip install --quiet -r requirements.txt
-          python3 blocket_mobility_packages_requests.py --test 20
-
-      - name: Check what is deployed and whether it has been running
+      # Deployed image + execution history: answers "will the next run use my
+      # change, and is the schedule even firing?" in one shot.
+      - name: check-deploy
         if: inputs.action == 'check-deploy'
-        # Answers "will Sunday's run use my change?" without waiting for it:
-        # the image the job is pinned to (tagged with the git SHA by deploy.yml),
-        # plus the execution history that shows the scheduler has actually been
-        # firing. Read-only.
-        #
-        # Note: describing the Cloud Scheduler job itself would need
-        # roles/cloudscheduler.viewer, which github-deployer does not have.
-        # The execution list is the evidence available under run.admin — a run
-        # appearing each Sunday IS the scheduler firing.
         run: |
-          echo "=== image currently deployed to ${JOB} ==="
-          gcloud run jobs describe "${JOB}" --region "${REGION}" --project "${PROJECT}" \
-            --format="value(spec.template.spec.template.spec.containers[0].image)"
+          echo "== Deployed image =="
+          gcloud run jobs describe "$JOB_NAME" --region="$REGION" \
+            --format='value(template.template.containers[0].image)'
           echo
-          echo "=== recent executions (each weekly row = the scheduler fired) ==="
-          gcloud run jobs executions list --job "${JOB}" \
-            --region "${REGION}" --project "${PROJECT}" --limit 8 \
-            --format="table(name,status.completionTime,status.succeededCount,status.failedCount)"
+          echo "== Recent executions =="
+          gcloud run jobs executions list --job="$JOB_NAME" --region="$REGION" --limit=10
+
+      # Last 12 BigQuery summary rows.
+      - name: bq-tail
+        if: inputs.action == 'bq-tail'
+        run: |
+          touch ~/.bigqueryrc
+          bq query --project_id="$PROJECT_ID" --use_legacy_sql=false --format=pretty --max_rows=12 \
+            'SELECT * FROM `vend-scrapers-v2.market_scraper.mobility_packages`
+             ORDER BY run_timestamp DESC LIMIT 12'
+
+      # Kick off an ad-hoc scrape. Async — the full run takes hours, longer
+      # than a runner should wait. Follow up with the "logs" action.
+      - name: run-scraper
+        if: inputs.action == 'run-scraper'
+        run: |
+          gcloud run jobs execute "$JOB_NAME" --region="$REGION"
+          echo
+          echo "Execution started (async). Use the 'logs' action later to see output."

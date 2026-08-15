@@ -1,39 +1,24 @@
-name: Export BigQuery data to repo
-
-# Snapshots the BigQuery output into data/ and commits it, so the numbers are
-# readable straight from the repo — by Claude Code, in PR diffs, or on GitHub —
-# without needing gcloud/bq access.
-#
-# Runs after the weekly scrape. The scrape fires Sundays 23:50 Oslo (21:50 UTC
-# in summer, 22:50 UTC in winter) and takes a while, so Monday 06:00 UTC is
-# comfortably after it in both DST states.
-#
-# The table is tiny (one row per site per weekly run), so the full history is
-# committed — no per-listing data ever lands in git; the runs/ debug CSVs stay
-# on GCP only.
-#
-# Needs BigQuery read access on the deploy service account — github-deployer
-# already holds bigquery.jobUser + bigquery.dataViewer from vend-scraper-v2.
+name: Export data
 
 on:
   schedule:
-    - cron: "0 6 * * 1"
-  workflow_dispatch:   # run on demand from the Actions tab
+    # Mondays 06:00 UTC — after the Sunday 23:50 Oslo scrape in both DST states.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # commit the snapshot
+  id-token: write   # WIF
 
 concurrency:
   group: export-data
-  cancel-in-progress: false
+
+env:
+  PROJECT_ID: vend-scrapers-v2
 
 jobs:
   export:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write    # needed to commit the snapshot back
-      id-token: write    # needed for Workload Identity Federation
-
-    env:
-      PROJECT: vend-scrapers-v2
-
     steps:
       - uses: actions/checkout@v4
 
@@ -45,99 +30,26 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      - name: Export full run history
-        # Sorted by run_timestamp ASC so each week appends to the end of the
-        # file and the git diff stays small instead of rewriting everything.
-        #
-        # grep drops the "WARNING: --scopes ... external_account" line bq emits
-        # on STDOUT under Workload Identity auth; unfiltered it becomes line 1
-        # of the CSV and Excel reads it as the header. Invisible in Cloud Shell
-        # (normal account, no warning), so only CI files would be malformed.
+      - name: Export weekly package mix
+        run: bash scripts/export_weekly_mix.sh data/weekly_package_mix.csv
+
+      - name: Generate health report
+        run: bash scripts/export_health.sh data/health.md
+
+      - name: Commit snapshot
         run: |
-          mkdir -p data
-          bq query --use_legacy_sql=false --project_id="${PROJECT}" \
-            --format=csv --max_rows=100000 \
-          "SELECT FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%S', run_timestamp) AS run_timestamp,
-                  site, premium_count, pluss_count, basis_count, total_count
-             FROM \`${PROJECT}.market_scraper.mobility_packages\`
-            ORDER BY run_timestamp ASC, site" \
-          | grep -v '^WARNING:' > data/mobility_packages.csv
-
-      - name: Build health report
-        # Layer-2 (pull) health check. The [WARN] log lines are layer 1, but
-        # they cannot fire if the job never runs — no run means no log line,
-        # and silence looks exactly like success. This table is what catches a
-        # dead scheduler.
-        #
-        # finn and blocket write rows at different timestamps (two scripts, one
-        # job), so freshness and volume are checked PER SITE — one site's script
-        # crashing while the other succeeds shows up as that site going stale.
-        run: |
-          bq_q() {
-            bq query --use_legacy_sql=false --project_id="${PROJECT}" "$@" 2>&1 \
-              | grep -v '^WARNING:' || true
-          }
-
-          {
-            echo "# Scraper health"
-            echo
-            echo "Generated $(date -u '+%Y-%m-%d %H:%M UTC') by .github/workflows/export_data.yml"
-            echo
-            echo "Weekly scrape: Sundays 23:50 Oslo, one row per site per run."
-            echo
-            echo "status per site:"
-            echo "- **OK** — fresh row, sane volume"
-            echo "- **STALE** — latest row older than 8 days: the job may not be running"
-            echo "  at all for this site. No run also means no [WARN] in the logs, so"
-            echo "  this table is the only thing that catches it."
-            echo "- **ZERO** — a row was written but nothing was classified (scrape ran,"
-            echo "  parser found no listings — likely a site markup change)"
-            echo "- **VOLUME DROP** — total more than 50% below the previous run (a"
-            echo "  breaking parser usually halves the count rather than zeroing it)"
-            echo
-            echo '```'
-          } > data/health.md
-
-          bq_q --format=pretty \
-          "WITH ranked AS (
-             SELECT site, run_timestamp, total_count, premium_count, pluss_count, basis_count,
-                    ROW_NUMBER() OVER (PARTITION BY site ORDER BY run_timestamp DESC) AS rn
-               FROM \`${PROJECT}.market_scraper.mobility_packages\`
-           )
-           SELECT l.site,
-                  FORMAT_TIMESTAMP('%Y-%m-%d %H:%M', l.run_timestamp) AS latest_run,
-                  TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), l.run_timestamp, DAY) AS age_days,
-                  l.total_count, p.total_count AS prev_total,
-                  l.premium_count, l.pluss_count, l.basis_count,
-                  CASE
-                    WHEN TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), l.run_timestamp, DAY) > 8 THEN 'STALE'
-                    WHEN l.total_count = 0 THEN 'ZERO'
-                    WHEN p.total_count IS NOT NULL AND l.total_count < p.total_count * 0.5 THEN 'VOLUME DROP'
-                    ELSE 'OK'
-                  END AS status
-             FROM ranked AS l
-             LEFT JOIN ranked AS p ON p.site = l.site AND p.rn = 2
-            WHERE l.rn = 1
-            ORDER BY l.site" >> data/health.md
-
-          echo '```' >> data/health.md
-
-      - name: Commit snapshot if changed
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/
           if git diff --cached --quiet; then
-            echo "No change in exported data — nothing to commit."
+            echo "No changes — skipping commit."
             exit 0
           fi
-          # [skip ci] belt-and-braces; deploy.yml also path-ignores data/ so a
-          # snapshot commit never triggers a docker build.
-          git commit -m "chore(data): refresh BigQuery snapshot [skip ci]"
-          # Rebase in case something else landed on main while the query ran.
-          for i in 1 2 3; do
-            git pull --rebase origin main && git push origin HEAD:main && exit 0
-            echo "push attempt $i failed, retrying..."
+          git commit -m "data: weekly export $(date -u +%F) [skip ci]"
+          for i in 1 2 3 4; do
+            if git push; then exit 0; fi
             sleep $((2 ** i))
+            git pull --rebase
           done
+          echo "Push failed after retries" >&2
           exit 1

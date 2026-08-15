@@ -2,38 +2,23 @@
 
 Scrapers that classify car dealer listings by package (Basis / Pluss / Premium) on finn.no (Norway) and blocket.se (Sweden). Runs as a scheduled Cloud Run Job on GCP (Sundays at 23:50 Oslo time). Results are written to BigQuery.
 
-## ⚠️ Constraint that shapes everything: no direct GCP access
+## ⚠️ Claude Code cannot reach GCP
 
-> **Claude Code cannot reach GCP.** The sandbox has no `gcloud`, no `bq`, and its network policy blocks GCP endpoints (and finn.no/blocket.se). Any plan that assumes running `gcloud`/`bq` locally will fail. GitHub is the only channel, in both directions:
+The sandbox has no `gcloud`, no `bq`, and its network policy blocks GCP endpoints. Any plan that assumes local `gcloud`/`bq` will fail. **All GCP access goes through GitHub Actions** — GitHub is the only channel, in both directions:
 
-```
-Claude Code  ──push──>  GitHub  ──Actions (WIF)──>  GCP
-     ^                    |                          |
-     └────read repo───────┴──<─ data/ + job logs ──<─┘
-```
-
-| Need | How Claude does it |
-|---|---|
-| Ship code | push to `main` → `deploy.yml` builds and deploys |
-| See the data | read `data/mobility_packages.csv` + `data/health.md` (committed weekly by `export_data.yml`); `git pull` for the latest |
-| Logs / ad-hoc runs / live-site probes | trigger `ops.yml` via the GitHub API (`actions_run_trigger`, workflow_dispatch), then read the job log (`get_job_logs` with `return_content: true`) |
-
-**Session start: read `data/health.md` first** — it leads with per-site freshness and flags stale/zero/volume-drop states.
-
-**Rule:** if a new capability needs GCP, add a *named* action to `ops.yml` — never a free-form command input (that would make repo write access equivalent to full control of the GCP project), and never hand the user a manual Cloud Shell command when a workflow can do it.
-
-### ops.yml menu
-
-| action | does | writes? |
+| Need | Route | How Claude does it |
 |---|---|---|
-| `logs` | recent job output (freshness 8d — the job is weekly) | no |
-| `warns` | only `[WARN]`/`[ERR]` lines, last 30d; prints `CLEAN` if none | no |
-| `run-scraper` | executes the job now, then prints signal lines | **yes** (one extra BQ row per site) |
-| `probe-finn` | runs `--test 20` against live finn.no from the runner | no |
-| `probe-blocket` | runs `--test 20` against live blocket.se from the runner | no |
-| `check-deploy` | deployed image (SHA-tagged) + recent execution history | no |
+| Ship code | push to `main` → `deploy.yml` → Cloud Run | commit + push |
+| See the data | `export_data.yml` → commits `data/` | `git pull`, then read files |
+| Logs / ad-hoc runs / deploy checks | `ops.yml` (workflow_dispatch) | trigger via `actions_run_trigger`, read via `get_job_logs` (`return_content: true`) |
 
-The probes are how you validate a detection change *before* deploying — GitHub runners can reach the scraped sites; the sandbox cannot.
+`ops.yml` actions: `logs` (recent job output), `check-deploy` (deployed image + execution history), `bq-tail` (last 12 BQ rows), `run-scraper` (ad-hoc execution, async — follow up with `logs`).
+
+Rules:
+- **Session start:** read `data/health.md` first — freshness plus volume anomalies.
+- **New GCP capability needed?** Add a *named* `ops.yml` action; never hand the user a manual command, and never add a free-form "run any gcloud command" input (that would make repo write access equivalent to full control of the GCP project).
+- `export_data.yml` runs Mondays 06:00 UTC (after the Sunday scrape, DST-safe) and commits `data/weekly_package_mix.csv` + `data/health.md` with `[skip ci]`. `deploy.yml` ignores `data/**` and `**.md` so snapshots never trigger builds.
+- `bq` under WIF prints a `WARNING:` line **to stdout** — export scripts pipe through `grep -v '^WARNING:'` and `touch ~/.bigqueryrc`. Keep that when editing them.
 
 ## What it does
 
@@ -109,17 +94,6 @@ Each run writes to three places:
 
 The `runs/` folder is gitignored and lives only on GCP.
 
-### Repo data snapshots (`data/`)
-
-Committed weekly by `export_data.yml` (Mondays 06:00 UTC, after the Sunday scrape) so results are readable without GCP access:
-
-| File | Contents |
-|------|----------|
-| `data/mobility_packages.csv` | Full run history from BigQuery, sorted ASC so weekly diffs append |
-| `data/health.md` | Per-site freshness + status (OK / STALE / ZERO / VOLUME DROP) |
-
-Only aggregate counts are committed — per-listing debug data never lands in git.
-
 ### BigQuery
 One row appended per run to `vend-scrapers-v2.market_scraper.mobility_packages`:
 
@@ -179,16 +153,10 @@ Push to `main` → GitHub Actions builds and deploys automatically. No manual `g
 **Gotchas:**
 - Use `docker build` + `docker push` directly — `gcloud builds submit` requires Viewer/Owner role
 - Service account needs `roles/artifactregistry.writer` explicitly for image pushes
-- `deploy.yml` path-ignores `data/**` and `**.md` so the weekly snapshot commit doesn't trigger a no-op Docker build; the export commit also carries `[skip ci]` as belt-and-braces
-- `ops.yml`/`export_data.yml` additionally rely on `roles/logging.viewer`, `roles/run.admin`, `roles/bigquery.jobUser` and `roles/bigquery.dataViewer` on `github-deployer` — already granted (in production use by vend-scraper-v2, same project and service account)
-- `bq` under WIF prints a `WARNING: --scopes` line on **stdout**, ahead of the CSV header — the export pipes through `grep -v '^WARNING:'`; keep that if you touch the queries
-- GitHub disables scheduled workflows after 60 days of repo inactivity; the weekly snapshot commit counts as activity, so `export_data.yml` is self-sustaining once running — but if it ever stops, check this first
 
 **For new repos in the same GCP project:** workflow YAML is copy-paste, just swap image URL and job names. No Cloud Shell IAM commands needed — the Workload Identity Provider attribute condition is set to `assertion.repository_owner=='markusheiberg'`, so all repos under that GitHub account are trusted automatically.
 
-## Common GCP commands (human, Cloud Shell only)
-
-> These are reference commands for a human in Cloud Shell. Claude Code cannot run them — use the `ops.yml` actions instead (see the constraint section at the top).
+## Common GCP commands (human, Cloud Shell only — Claude: use the workflows above)
 
 ### Build and push image
 ```bash
