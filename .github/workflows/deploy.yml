@@ -3,6 +3,10 @@ name: Deploy
 on:
   push:
     branches: [main]
+    # Data snapshots and docs don't affect the image, so they must not trigger a
+    # build — export_data.yml commits to data/ every week. A commit touching
+    # code AND these paths still deploys; the skip only applies when everything
+    # changed is ignored.
     paths-ignore:
       - 'data/**'
       - '**.md'
