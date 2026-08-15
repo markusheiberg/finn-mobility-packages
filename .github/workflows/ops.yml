@@ -1,0 +1,144 @@
+name: Ops — run GCP commands on demand
+
+# Bounded remote control for GCP, so debugging does not require Cloud Shell.
+# Everything this prints is readable from the workflow log, including by Claude
+# Code via the GitHub API (actions_run_trigger + get_job_logs) — which is the
+# point: the Claude Code sandbox has no gcloud/bq and cannot reach GCP.
+#
+# Deliberately a FIXED MENU of actions rather than an arbitrary command input.
+# A free-form "run this gcloud command" box would turn repo write access into
+# arbitrary control of the GCP project; these actions are all read-only except
+# the explicit job run. When something new is needed, add a NAMED action.
+#
+# No extra IAM needed — github-deployer already holds logging.viewer (reads)
+# and run.admin (executes jobs) from its use in vend-scraper-v2.
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to do
+        required: true
+        default: logs
+        type: choice
+        options:
+          - logs             # recent scraper output
+          - warns            # only [WARN]/[ERR] lines, last 30 days
+          - run-scraper      # execute the weekly scrape job now (writes to BigQuery)
+          - probe-finn       # classify ~20 live finn listings from the runner (no writes)
+          - probe-blocket    # classify ~20 live blocket listings from the runner (no writes)
+          - check-deploy     # what image the job runs + recent execution history
+      limit:
+        description: Log lines to fetch (logs/warns only)
+        required: false
+        default: "200"
+        type: string
+
+concurrency:
+  group: ops
+  cancel-in-progress: false
+
+jobs:
+  ops:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      PROJECT: vend-scrapers-v2
+      REGION: europe-north1
+      JOB: mobility-packages
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/895238155180/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-deployer@vend-scrapers-v2.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@v2
+        if: inputs.action != 'probe-finn' && inputs.action != 'probe-blocket'
+
+      - name: Recent scraper logs
+        if: inputs.action == 'logs'
+        # freshness=8d because the job is weekly (Sundays 23:50 Oslo) — 2d would
+        # usually return nothing.
+        run: |
+          gcloud logging read \
+            "resource.type=cloud_run_job AND resource.labels.job_name=${JOB}" \
+            --limit "${{ inputs.limit }}" --freshness=8d \
+            --format "table(timestamp,textPayload)" --project "${PROJECT}"
+
+      - name: Recent [WARN] and [ERR] lines
+        if: inputs.action == 'warns'
+        # textPayload=~ is a regex match; brackets escaped so [WARN] is matched
+        # literally rather than tokenised. Prints CLEAN when nothing matched, so
+        # silence is never ambiguous.
+        run: |
+          OUT="$(gcloud logging read \
+            "resource.type=cloud_run_job AND resource.labels.job_name=${JOB} AND textPayload=~\"\\[WARN\\]|\\[ERR\\]\"" \
+            --limit "${{ inputs.limit }}" --freshness=30d \
+            --format "table(timestamp,textPayload)" --project "${PROJECT}" || true)"
+          if [ -z "${OUT}" ]; then
+            echo "CLEAN — no [WARN]/[ERR] lines in the last 30 days."
+          else
+            echo "${OUT}"
+          fi
+
+      - name: Run the scraper now
+        if: inputs.action == 'run-scraper'
+        # Writes one real row per site to mobility_packages, so a midweek manual
+        # run adds an extra point to the weekly series. Harmless but visible —
+        # consumers should read the latest row per week, not assume one row/week.
+        # The full scrape can take a while; --wait blocks until it finishes.
+        # Afterwards print only the signal lines — the full log is thousands of
+        # per-listing lines.
+        run: |
+          gcloud run jobs execute "${JOB}" \
+            --region "${REGION}" --project "${PROJECT}" --wait
+          echo "=== output (signal lines only — use the logs action for more) ==="
+          gcloud logging read \
+            "resource.type=cloud_run_job AND resource.labels.job_name=${JOB} AND textPayload=~\"\\[BQ\\]|\\[WARN\\]|\\[ERR\\]|Starting|Done\"" \
+            --limit 300 --freshness=6h \
+            --format "table(timestamp,textPayload)" --project "${PROJECT}"
+
+      - name: Probe finn classification against the live site (no writes)
+        if: inputs.action == 'probe-finn'
+        # Runs the scraper's --test mode from the runner, which CAN reach
+        # finn.no — the Claude Code sandbox cannot. Classifies ~20 listings and
+        # prints the per-listing package result. Touches no BigQuery and no
+        # Cloud Run job, so it is safe any time and is the way to validate a
+        # detection change BEFORE deploying it.
+        run: |
+          pip install --quiet -r requirements.txt
+          python3 finn_mobility_packages_requests.py --test 20
+
+      - name: Probe blocket classification against the live site (no writes)
+        if: inputs.action == 'probe-blocket'
+        run: |
+          pip install --quiet -r requirements.txt
+          python3 blocket_mobility_packages_requests.py --test 20
+
+      - name: Check what is deployed and whether it has been running
+        if: inputs.action == 'check-deploy'
+        # Answers "will Sunday's run use my change?" without waiting for it:
+        # the image the job is pinned to (tagged with the git SHA by deploy.yml),
+        # plus the execution history that shows the scheduler has actually been
+        # firing. Read-only.
+        #
+        # Note: describing the Cloud Scheduler job itself would need
+        # roles/cloudscheduler.viewer, which github-deployer does not have.
+        # The execution list is the evidence available under run.admin — a run
+        # appearing each Sunday IS the scheduler firing.
+        run: |
+          echo "=== image currently deployed to ${JOB} ==="
+          gcloud run jobs describe "${JOB}" --region "${REGION}" --project "${PROJECT}" \
+            --format="value(spec.template.spec.template.spec.containers[0].image)"
+          echo
+          echo "=== recent executions (each weekly row = the scheduler fired) ==="
+          gcloud run jobs executions list --job "${JOB}" \
+            --region "${REGION}" --project "${PROJECT}" --limit 8 \
+            --format="table(name,status.completionTime,status.succeededCount,status.failedCount)"
