@@ -116,6 +116,7 @@ Committed weekly by `export_data.yml` (Mondays 06:00 UTC, after the Sunday scrap
 | File | Contents |
 |------|----------|
 | `data/mobility_packages.csv` | Full run history from BigQuery, sorted ASC so weekly diffs append |
+| `data/weekly_package_mix.csv` | Weekly mix per site — counts + share (%) per package, latest run per week, Excel-ready (query lives in `scripts/export_weekly_mix.sh`) |
 | `data/health.md` | Per-site freshness + status (OK / STALE / ZERO / VOLUME DROP) |
 
 Only aggregate counts are committed — per-listing debug data never lands in git.

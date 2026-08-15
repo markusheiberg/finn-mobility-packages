@@ -63,6 +63,12 @@ jobs:
             ORDER BY run_timestamp ASC, site" \
           | grep -v '^WARNING:' > data/mobility_packages.csv
 
+      - name: Export weekly package mix
+        # Pre-aggregated weekly mix (counts + share % per package, per site) —
+        # derivable from mobility_packages.csv, but committed ready-made so it
+        # can be downloaded from GitHub straight into Excel without pivoting.
+        run: bash scripts/export_weekly_mix.sh data/weekly_package_mix.csv
+
       - name: Build health report
         # Layer-2 (pull) health check. The [WARN] log lines are layer 1, but
         # they cannot fire if the job never runs — no run means no log line,
