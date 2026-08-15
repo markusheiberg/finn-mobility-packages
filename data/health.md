@@ -1,6 +1,6 @@
 # Scraper health
 
-Generated 2026-08-15 15:54 UTC by .github/workflows/export_data.yml
+Generated 2026-08-15 16:15 UTC by .github/workflows/export_data.yml
 
 Weekly scrape: Sundays 23:50 Oslo, one row per site per run.
 
