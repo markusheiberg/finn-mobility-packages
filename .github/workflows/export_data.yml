@@ -45,6 +45,14 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
+      - name: Check the sample fraction is recorded
+        # Package counts scale with SAMPLE_FRACTION. If a scraper's value no
+        # longer matches the last entry in scripts/sample_fraction.sh, the
+        # exported sample_fraction column would be wrong, so stop here.
+        run: |
+          source scripts/sample_fraction.sh
+          check_sample_fraction .
+
       - name: Export full run history
         # Sorted by run_timestamp ASC so each week appends to the end of the
         # file and the git diff stays small instead of rewriting everything.
@@ -53,12 +61,17 @@ jobs:
         # on STDOUT under Workload Identity auth; unfiltered it becomes line 1
         # of the CSV and Excel reads it as the header. Invisible in Cloud Shell
         # (normal account, no warning), so only CI files would be malformed.
+        #
+        # sample_fraction is derived from scripts/sample_fraction.sh: counts are
+        # a sample, and doubled on 2026-07-20 when the sample went 5% -> 10%.
         run: |
           mkdir -p data
+          source scripts/sample_fraction.sh
           bq query --use_legacy_sql=false --project_id="${PROJECT}" \
             --format=csv --max_rows=100000 \
           "SELECT FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%S', run_timestamp) AS run_timestamp,
-                  site, premium_count, pluss_count, basis_count, total_count
+                  site, premium_count, pluss_count, basis_count, total_count,
+                  $(sample_fraction_sql run_timestamp) AS sample_fraction
              FROM \`${PROJECT}.market_scraper.mobility_packages\`
             ORDER BY run_timestamp ASC, site" \
           | grep -v '^WARNING:' > data/mobility_packages.csv
@@ -101,6 +114,8 @@ jobs:
             echo "- **VOLUME DROP** — total more than 50% below the previous run (a"
             echo "  breaking parser usually halves the count rather than zeroing it)"
             echo
+            echo "## Latest run per site"
+            echo
             echo '```'
           } > data/health.md
 
@@ -126,9 +141,81 @@ jobs:
             WHERE l.rn = 1
             ORDER BY l.site" >> data/health.md
 
+          {
+            echo '```'
+            echo
+            echo "## Runs whose package mix looks wrong (full history)"
+            echo
+            echo "Empty table = every run looks sane. A volume check cannot see these:"
+            echo "the total stays plausible while the classification breaks."
+            echo
+            echo "- **MIX SHIFT** — a package's share moved >15pp against the mean of the"
+            echo "  previous 4 runs. Runs with Premium or Basis at zero are left out of that"
+            echo "  baseline, so one broken run cannot flag the healthy run after it"
+            echo "- **<PACKAGE> ZERO** — a package that appeared in any of the previous 4"
+            echo "  runs is now zero (blocket 2026-05-17 and 05-24: Premium read as zero,"
+            echo "  every dealer as Basis)"
+            echo
+            echo "Shares, not counts, so the 2026-07-20 sample change (5% -> 10%) does not flag."
+            echo
+            echo '```'
+          } >> data/health.md
+
+          bq_q --format=pretty --max_rows=1000 \
+          "WITH runs AS (
+             SELECT site, run_timestamp, premium_count, pluss_count, basis_count, total_count,
+                    SAFE_DIVIDE(premium_count, total_count) * 100 AS prem,
+                    SAFE_DIVIDE(pluss_count,   total_count) * 100 AS plus,
+                    SAFE_DIVIDE(basis_count,   total_count) * 100 AS bas,
+                    premium_count > 0 AND basis_count > 0         AS baseline_ok
+               FROM \`${PROJECT}.market_scraper.mobility_packages\`
+           ),
+           w AS (
+             SELECT *,
+                    AVG(IF(baseline_ok, prem, NULL)) OVER prev4 AS prem4,
+                    AVG(IF(baseline_ok, plus, NULL)) OVER prev4 AS plus4,
+                    AVG(IF(baseline_ok, bas,  NULL)) OVER prev4 AS bas4,
+                    COUNTIF(baseline_ok)             OVER prev4 AS n4,
+                    MAX(premium_count) OVER prev4 AS prem_max4,
+                    MAX(pluss_count)   OVER prev4 AS plus_max4,
+                    MAX(basis_count)   OVER prev4 AS bas_max4
+               FROM runs
+             WINDOW prev4 AS (PARTITION BY site ORDER BY run_timestamp
+                              ROWS BETWEEN 4 PRECEDING AND 1 PRECEDING)
+           ),
+           flagged AS (
+             SELECT *,
+                    CONCAT(
+                      IF(n4 >= 2 AND GREATEST(ABS(prem - prem4), ABS(plus - plus4), ABS(bas - bas4)) > 15,
+                         'MIX SHIFT; ', ''),
+                      IF(premium_count = 0 AND prem_max4 > 0, 'PREMIUM ZERO; ', ''),
+                      IF(pluss_count   = 0 AND plus_max4 > 0, 'PLUSS ZERO; ',   ''),
+                      IF(basis_count   = 0 AND bas_max4  > 0, 'BASIS ZERO; ',   '')
+                    ) AS problems
+               FROM w
+           )
+           SELECT site, FORMAT_TIMESTAMP('%Y-%m-%d %H:%M', run_timestamp) AS run,
+                  premium_count, pluss_count, basis_count, total_count,
+                  ROUND(prem, 1) AS premium_pct, ROUND(prem4, 1) AS premium_pct_prev4,
+                  problems
+             FROM flagged
+            WHERE problems != ''
+            ORDER BY run_timestamp, site" >> data/health.md
+
           echo '```' >> data/health.md
 
+      # Commit only from main. This step pushes HEAD to main, so dispatched from
+      # a feature branch it would land that branch's unreviewed commits there.
+      # A branch run prints the result instead, which is how to test a query change.
+      - name: Show result (branch run, not committed)
+        if: github.ref != 'refs/heads/main'
+        run: |
+          git status --short data/
+          cat data/health.md
+          head -5 data/weekly_package_mix.csv data/mobility_packages.csv
+
       - name: Commit snapshot if changed
+        if: github.ref == 'refs/heads/main'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
