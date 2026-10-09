@@ -117,9 +117,27 @@ Committed weekly by `export_data.yml` (Mondays 06:00 UTC, after the Sunday scrap
 |------|----------|
 | `data/mobility_packages.csv` | Full run history from BigQuery, sorted ASC so weekly diffs append |
 | `data/weekly_package_mix.csv` | Weekly mix per site — counts + share (%) per package, latest run per week, Excel-ready (query lives in `scripts/export_weekly_mix.sh`) |
-| `data/health.md` | Per-site freshness + status (OK / STALE / ZERO / VOLUME DROP) |
+| `data/health.md` | Per-site freshness + status (OK / STALE / ZERO / VOLUME DROP), then every run in the history whose package mix looks wrong (MIX SHIFT / <PACKAGE> ZERO) |
 
 Only aggregate counts are committed — per-listing debug data never lands in git.
+
+⚠️ **Counts are a SAMPLE, and the sample size changed.** Both CSVs carry a
+`sample_fraction` column: 0.05 until 2026-07-20, 0.10 since (commit 91ddf01), so
+every count doubles at that date while the shares do not. Use the `_pct` columns
+for trends. The BigQuery table has no such column; the exports derive it from
+`scripts/sample_fraction.sh`. **If you change `SAMPLE_FRACTION`, append the change
+there** (UTC deploy time and value): the export fails until the scrapers' value
+matches the last entry.
+
+**The mix check exists because volume checks cannot see a classification break.**
+On 2026-05-17 and 05-24 blocket read every dealer as Basis (Premium 0) while the
+total stayed ~5,950, so the old health table said OK. `health.md` now flags a
+package share moving >15pp against the previous 4 runs, and a package that was
+present dropping to zero. Replayed on the full history, it flags exactly those
+two runs.
+
+`export_data.yml` commits only when run from `main`; dispatched from a branch it
+prints the result instead. That is how to test a query change.
 
 ### BigQuery
 One row appended per run to `vend-scrapers-v2.market_scraper.mobility_packages`:
