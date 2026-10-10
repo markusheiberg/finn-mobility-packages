@@ -204,6 +204,30 @@ jobs:
 
           echo '```' >> data/health.md
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tradera vs Blocket private cars (weekly)
+        # Is Tradera's growing private car stock the same kind of stock as
+        # Blocket's? Census of private car listings on both sites: days since
+        # published and price. Same shape as finn-bolig-packages' finn x hjem
+        # overlap: runs on this GitHub runner (not Cloud Run), writes the latest
+        # report to data/, appends a dated block to a history CSV so the weekly
+        # change is kept, and keeps per-listing rows in runs/ (gitignored).
+        #
+        # ~40 Tradera pages + ~550 Blocket pages, 1 s apart: ~12 minutes.
+        # continue-on-error: either site changing its markup must not cost the
+        # package snapshot this workflow exists for.
+        continue-on-error: true
+        timeout-minutes: 40
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          pip install --quiet requests beautifulsoup4
+          python3 private_cars_se_compare.py \
+            --out data/private_cars_se --history data/private_cars_se/history.csv
+
       # Commit only from main. This step pushes HEAD to main, so dispatched from
       # a feature branch it would land that branch's unreviewed commits there.
       # A branch run prints the result instead, which is how to test a query change.
@@ -212,6 +236,7 @@ jobs:
         run: |
           git status --short data/
           cat data/health.md
+          cat data/private_cars_se/summary.md || true
           head -5 data/weekly_package_mix.csv data/mobility_packages.csv
 
       - name: Commit snapshot if changed

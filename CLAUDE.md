@@ -139,6 +139,41 @@ two runs.
 `export_data.yml` commits only when run from `main`; dispatched from a branch it
 prints the result instead. That is how to test a query change.
 
+### Tradera vs Blocket, private cars (weekly, `data/private_cars_se/`)
+
+Is Tradera's growing private car stock the same kind of stock as Blocket's? A
+census of private car listings on both sites, run weekly inside `export_data.yml`
+on the GitHub runner, the same way finn-bolig-packages runs its finn x hjem
+overlap (not Cloud Run, no BigQuery). `private_cars_se_compare.py` writes:
+
+| File | Contents |
+|------|----------|
+| `data/private_cars_se/summary.md` | latest week: counts, medians, age and price distributions side by side |
+| `data/private_cars_se/listing_age.csv`, `price.csv` | the same distributions as tables |
+| `data/private_cars_se/history.csv` | one dated block per week, long format (`run_date, site, metric, band, value`); a re-run the same day replaces that day |
+
+URLs: Tradera `category/1001?sellerType=Private` (Fordon › Bilar, cars only),
+Blocket `mobility/search/car?dealer_segment=3`.
+
+⚠️ **"Published" is not the same measurement on the two sites:**
+- **Tradera:** `startDate` from the search results. Private cars are 60-day
+  classifieds (`itemType` ContactOnly), so this is the publish date; a relisted
+  car restarts its clock.
+- **Blocket:** no publish date anywhere (the ad page only has "Uppdaterad", the
+  last edit). Two proxies from the search cards: the card time, which resets on
+  every renewal or paid bump (understates age), and an **ID estimate**: IDs are
+  issued in sequence and a card's time is never before its creation, so creation
+  is no later than the earliest card time among higher IDs. The ID estimate is the
+  one to compare with Tradera; the gap between the two Blocket measures is how
+  much renewing goes on.
+- Blocket's search stops at 50 pages and lists newest first, so the census walks
+  price bands narrow enough to fit under the cap. Sampling the unfiltered search
+  would only ever see the newest ads.
+- Older Blocket cards show a date ("17 sep") instead of a relative time; a date
+  with no year is its latest past occurrence.
+
+Only aggregates are committed; per-listing rows stay in `runs/`.
+
 ### BigQuery
 One row appended per run to `vend-scrapers-v2.market_scraper.mobility_packages`:
 

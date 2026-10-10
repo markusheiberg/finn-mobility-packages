@@ -266,7 +266,8 @@ def label(lo, hi, unit=""):
     return f"{f(lo)}+" if hi is None else f"{f(lo)}–{f(hi)}"
 
 
-def write_outputs(tr, tr_total, bl, bl_total, bands, now: datetime, out_dir: Path):
+def write_outputs(tr, tr_total, bl, bl_total, bands, now: datetime, out_dir: Path,
+                  history: Path | None = None):
     out_dir.mkdir(parents=True, exist_ok=True)
     tr_age = [(now - datetime.fromisoformat(t["startDate"].replace("Z", "+00:00")[:26] + "+00:00"
                                             if "." in t["startDate"] else t["startDate"].replace("Z", "+00:00"))
@@ -324,17 +325,59 @@ def write_outputs(tr, tr_total, bl, bl_total, bands, now: datetime, out_dir: Pat
         lines.append(f"| {label(lo, hi, 'kr')} | {dt[i]:.1f} | {db[i]:.1f} |")
     lines += ["", "## How to read this", "",
               "- **Tradera** dates are exact: `startDate` of a 60-day classified. A car relisted after 60 days restarts its clock.",
-              "- **Blocket (ID estimate)** is the closest Blocket gets to a publish date: ad IDs are issued in order, so an ad was created no later than the newest card time among ads with a higher ID. It can only overstate freshness slightly, never invent age.",
+              "- **Blocket (ID estimate)** is the closest Blocket gets to a publish date: ad IDs are issued in order, so an ad was created no later than the earliest card time among ads with a higher ID. It can only overstate freshness slightly, never invent age.",
               "- **Blocket (published or renewed)** is the card's own time. Renewals and paid bumps reset it, so it understates age; the gap between the two Blocket columns is how much renewing goes on.",
               "- Paid placements (\"Betald placering\") are left out of Blocket; they repeat across pages.",
               f"- Blocket was read through {len(bands)} price bands so every listing is reachable past its 50-page search limit."]
     (out_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if history:
+        append_history(history, now, tr_total, bl_total, tr, bl, tr_age, bl_id, bl_card,
+                       tr_price, bl_price)
     return "\n".join(lines)
+
+
+HISTORY_COLS = ["run_date", "site", "metric", "band", "value"]
+
+
+def append_history(path: Path, now, tr_total, bl_total, tr, bl, tr_age, bl_id, bl_card,
+                   tr_price, bl_price) -> None:
+    """One dated block of rows per run, long format, so the weekly series can be
+    charted per band. A re-run on the same day replaces that day's block."""
+    d = now.date().isoformat()
+    rows = []
+    add = lambda site, metric, band, v: rows.append(
+        {"run_date": d, "site": site, "metric": metric, "band": band,
+         "value": "" if v != v else round(v, 1)})                    # NaN -> blank
+    med = lambda xs: statistics.median(xs) if xs else float("nan")
+    for site, total, read, prices in (("tradera", tr_total, len(tr), tr_price),
+                                      ("blocket", bl_total, len(bl), bl_price)):
+        add(site, "listings_site_count", "", total)
+        add(site, "listings_read", "", read)
+        add(site, "median_price_sek", "", med(prices))
+        for i, (lo, hi) in enumerate(PRICE_BANDS):
+            add(site, "price_pct", label(lo, hi, "kr"), dist(prices, PRICE_BANDS)[i])
+    for site, metric, ages in (("tradera", "age_published", tr_age),
+                               ("blocket", "age_published_id_estimate", bl_id),
+                               ("blocket", "age_published_or_renewed", bl_card)):
+        add(site, f"median_{metric}_days", "", med(ages))
+        for i, (lo, hi) in enumerate(AGE_BANDS):
+            add(site, f"{metric}_pct", label(lo, hi), dist(ages, AGE_BANDS)[i])
+    old = []
+    if path.exists():
+        with open(path, newline="", encoding="utf-8") as f:
+            old = [r for r in csv.DictReader(f) if r["run_date"] != d]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=HISTORY_COLS, lineterminator="\n")
+        w.writeheader()
+        w.writerows(old + rows)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--test", action="store_true")
+    ap.add_argument("--out", default=None, help="aggregate output dir (default data/private_cars_se)")
+    ap.add_argument("--history", default=None, help="append this run to a long-format history CSV")
     a = ap.parse_args()
     now = NOW
     tr, tr_total = tradera_census(a.test)
@@ -347,8 +390,10 @@ def main():
             with open(runs / f"private_cars_se_{name}_{stamp}.csv", "w", newline="") as f:
                 w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) + (["id_age_min"] if name == "blocket" and "id_age_min" not in rows[0] else []))
                 w.writeheader(); w.writerows(rows)
-    out = Path("runs/test_private_cars_se") if a.test else Path("data/private_cars_se")
-    print(write_outputs(tr, tr_total, bl, bl_total, bands, now, out))
+    out = Path(a.out) if a.out else (Path("runs/test_private_cars_se") if a.test
+                                     else Path("data/private_cars_se"))
+    print(write_outputs(tr, tr_total, bl, bl_total, bands, now, out,
+                        Path(a.history) if a.history else None))
 
 
 if __name__ == "__main__":
