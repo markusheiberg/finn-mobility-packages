@@ -204,6 +204,37 @@ jobs:
 
           echo '```' >> data/health.md
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tradera vs Blocket private cars (weekly)
+        # The census itself runs in Cloud Run, inside the Sunday mobility-packages
+        # job (run_all.py), and appends one run of summary rows to
+        # market_scraper.private_cars_se. Here: copy that table to
+        # data/private_cars_se/history.csv and render summary.md + CSVs from the
+        # latest run. Aggregates only; per-listing rows never leave Cloud Run.
+        #
+        # Skips cleanly until the first census has written the table, and
+        # continue-on-error so it can never cost the package snapshot.
+        continue-on-error: true
+        run: |
+          if ! bq show --project_id="${PROJECT}" "${PROJECT}:market_scraper.private_cars_se" >/dev/null 2>&1; then
+            echo "market_scraper.private_cars_se does not exist yet; skipping."
+            exit 0
+          fi
+          mkdir -p data/private_cars_se
+          bq query --use_legacy_sql=false --project_id="${PROJECT}" \
+            --format=csv --max_rows=1000000 \
+          "SELECT FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%S+00:00', run_timestamp) AS run_timestamp,
+                  site, metric, band, value
+             FROM \`${PROJECT}.market_scraper.private_cars_se\`
+            ORDER BY run_timestamp, site, metric, band" \
+          | grep -v '^WARNING:' > data/private_cars_se/history.csv
+          pip install --quiet requests beautifulsoup4    # module imports; --render fetches nothing
+          python3 private_cars_se_compare.py \
+            --render data/private_cars_se/history.csv --out data/private_cars_se
+
       # Commit only from main. This step pushes HEAD to main, so dispatched from
       # a feature branch it would land that branch's unreviewed commits there.
       # A branch run prints the result instead, which is how to test a query change.
@@ -212,6 +243,7 @@ jobs:
         run: |
           git status --short data/
           cat data/health.md
+          cat data/private_cars_se/summary.md || true
           head -5 data/weekly_package_mix.csv data/mobility_packages.csv
 
       - name: Commit snapshot if changed

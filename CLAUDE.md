@@ -32,6 +32,7 @@ Claude Code  ──push──>  GitHub  ──Actions (WIF)──>  GCP
 | `probe-finn` | runs `--test 20` against live finn.no from the runner | no |
 | `probe-blocket` | runs `--test 20` against live blocket.se from the runner | no |
 | `check-deploy` | deployed image (SHA-tagged) + recent execution history | no |
+| `run-private-cars-se` | Tradera vs Blocket census only, in Cloud Run (~20 min) | **yes** (one run in `private_cars_se`) |
 
 The probes are how you validate a detection change *before* deploying — GitHub runners can reach the scraped sites; the sandbox cannot.
 
@@ -138,6 +139,50 @@ two runs.
 
 `export_data.yml` commits only when run from `main`; dispatched from a branch it
 prints the result instead. That is how to test a query change.
+
+### Tradera vs Blocket, private cars (weekly, `data/private_cars_se/`)
+
+Is Tradera's growing private car stock the same kind of stock as Blocket's? A
+census of private car listings on both sites, every listing, ~20 minutes.
+
+**Runs in Cloud Run**, inside the Sunday `mobility-packages` job: `run_all.py`
+runs it after the package scrapes, in a `try`, so a census failure logs `[ERR]`
+and never touches the package rows. It appends one run of summary rows to
+`market_scraper.private_cars_se` (`run_timestamp, site, metric, band, value`).
+The job's task timeout is set to 3600s in `deploy.yml` to make room for it.
+`ops.yml` → `run-private-cars-se` runs the census alone (`ONLY=private_cars_se`),
+writing no package rows.
+
+The Monday `export_data.yml` copies the table to `data/`, then renders the
+report from the latest run (`--render`, no scraping):
+
+| File | Contents |
+|------|----------|
+| `data/private_cars_se/summary.md` | latest week: counts, medians, age and price distributions side by side |
+| `data/private_cars_se/listing_age.csv`, `price.csv` | the same distributions as tables |
+| `data/private_cars_se/history.csv` | every weekly run, long format, from BigQuery |
+
+URLs: Tradera `category/1001?sellerType=Private` (Fordon › Bilar, cars only),
+Blocket `mobility/search/car?dealer_segment=3`.
+
+⚠️ **"Published" is not the same measurement on the two sites:**
+- **Tradera:** `startDate` from the search results. Private cars are 60-day
+  classifieds (`itemType` ContactOnly), so this is the publish date; a relisted
+  car restarts its clock.
+- **Blocket:** no publish date anywhere (the ad page only has "Uppdaterad", the
+  last edit). Two proxies from the search cards: the card time, which resets on
+  every renewal or paid bump (understates age), and an **ID estimate**: IDs are
+  issued in sequence and a card's time is never before its creation, so creation
+  is no later than the earliest card time among higher IDs. The ID estimate is the
+  one to compare with Tradera; the gap between the two Blocket measures is how
+  much renewing goes on.
+- Blocket's search stops at 50 pages and lists newest first, so the census walks
+  price bands narrow enough to fit under the cap. Sampling the unfiltered search
+  would only ever see the newest ads.
+- Older Blocket cards show a date ("17 sep") instead of a relative time; a date
+  with no year is its latest past occurrence.
+
+Only aggregates are stored anywhere; per-listing rows are never written.
 
 ### BigQuery
 One row appended per run to `vend-scrapers-v2.market_scraper.mobility_packages`:
