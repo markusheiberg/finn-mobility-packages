@@ -1,7 +1,8 @@
 """Private cars in Sweden, Tradera vs Blocket: listing age and price distribution.
 
-    python3 private_cars_se_compare.py            # full census of both sites
-    python3 private_cars_se_compare.py --test     # 2 pages per site, to check parsing
+    python3 private_cars_se_compare.py --bigquery           # what Cloud Run runs (run_all.py)
+    python3 private_cars_se_compare.py --test               # 2 pages per site, to check parsing
+    python3 private_cars_se_compare.py --render HISTORY_CSV # the Monday export: report, no scraping
 
 Question it answers: when Tradera's private car count grows, is it the same kind
 of stock as Blocket's (similar prices, similar freshness), or something else?
@@ -25,8 +26,10 @@ Blocket caps search pagination at 50 pages and lists newest first, so the census
 walks narrow price bands (split until each fits under the cap) — sampling the
 unfiltered search would only ever see the newest ads.
 
-Writes aggregates only to data/private_cars_se/ (committed); per-listing rows go
-to runs/ (gitignored), as for the package scrapers. Polite: one request at a
+Runs weekly in Cloud Run, after the package scrapes, and appends summary rows
+(one per site x metric x band) to market_scraper.private_cars_se. The Monday
+export copies that table to data/private_cars_se/history.csv and renders
+summary.md from the latest run. Per-listing rows are never stored. Polite: one request at a
 time with a delay; both sites' robots.txt allow these paths (checked 2026-10-10).
 """
 from __future__ import annotations
@@ -245,6 +248,21 @@ def blocket_id_ages(cards: list[dict]) -> None:
 
 
 # ── summaries ────────────────────────────────────────────────────────────────
+#
+# One set of numbers, three destinations: summarise() turns a census into long
+# rows (run_timestamp, site, metric, band, value); those rows go to BigQuery
+# (production, the Cloud Run job), to a history CSV (local runs), and render()
+# draws the report from them. The Monday export re-renders the report from the
+# BigQuery history, so the committed summary can never disagree with the table.
+
+BQ_TABLE = "vend-scrapers-v2.market_scraper.private_cars_se"
+ROW_COLS = ["run_timestamp", "site", "metric", "band", "value"]
+AGE_MEASURES = [  # (site, metric stem, column title)
+    ("tradera", "age_published", "Tradera"),
+    ("blocket", "age_published_id_estimate", "Blocket (ID estimate)"),
+    ("blocket", "age_published_or_renewed", "Blocket (published or renewed)"),
+]
+
 
 def band_of(v: float, bands) -> int:
     for i, (lo, hi) in enumerate(bands):
@@ -262,138 +280,188 @@ def dist(values: list[float], bands) -> list[float]:
 
 
 def label(lo, hi, unit=""):
-    f = (lambda x: f"{x // 1000:,}k".replace(",", " ")) if unit == "kr" else str
+    f = (lambda x: f"{x // 1000}k") if unit == "kr" else str
     return f"{f(lo)}+" if hi is None else f"{f(lo)}–{f(hi)}"
 
 
-def write_outputs(tr, tr_total, bl, bl_total, bands, now: datetime, out_dir: Path,
-                  history: Path | None = None):
-    out_dir.mkdir(parents=True, exist_ok=True)
-    tr_age = [(now - datetime.fromisoformat(t["startDate"].replace("Z", "+00:00")[:26] + "+00:00"
-                                            if "." in t["startDate"] else t["startDate"].replace("Z", "+00:00"))
-               ).total_seconds() / 86400 for t in tr if t["startDate"]]
-    tr_price = [int(t["price"]) for t in tr if t["price"] and int(t["price"]) > 0]
-    bl_card = [c["card_age_min"] / 1440 for c in bl if c["card_age_min"] is not None]
-    bl_id = [c["id_age_min"] / 1440 for c in bl if c.get("id_age_min") is not None]
-    bl_price = [c["price"] for c in bl if c["price"]]
+def iso_utc(s: str) -> datetime:
+    """Tradera writes 7 fractional digits; Python reads at most 6."""
+    s = re.sub(r"(\.\d{6})\d+", r"\1", s).replace("Z", "+00:00")
+    d = datetime.fromisoformat(s)
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
-    series = {
-        "Tradera, days since published": tr_age,
-        "Blocket, days since published (ID estimate)": bl_id,
-        "Blocket, days since published or renewed": bl_card,
+
+def summarise(tr, tr_total, bl, bl_total, bands, now: datetime) -> list[dict]:
+    ts = now.isoformat()
+    rows = []
+
+    def add(site, metric, band, v):
+        rows.append({"run_timestamp": ts, "site": site, "metric": metric, "band": band,
+                     "value": None if v is None or v != v else round(float(v), 2)})
+
+    ages = {
+        "tradera": {"age_published": [(now - iso_utc(t["startDate"])).total_seconds() / 86400
+                                      for t in tr if t["startDate"]]},
+        "blocket": {"age_published_id_estimate": [c["id_age_min"] / 1440 for c in bl
+                                                  if c.get("id_age_min") is not None],
+                    "age_published_or_renewed": [c["card_age_min"] / 1440 for c in bl
+                                                 if c["card_age_min"] is not None]},
     }
-    with open(out_dir / "listing_age.csv", "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["age_days", *series])
-        for i, (lo, hi) in enumerate(AGE_BANDS):
-            w.writerow([label(lo, hi), *[round(dist(v, AGE_BANDS)[i], 1) for v in series.values()]])
-    with open(out_dir / "price.csv", "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["price_sek", "tradera_pct", "blocket_pct"])
-        dt, db = dist(tr_price, PRICE_BANDS), dist(bl_price, PRICE_BANDS)
+    prices = {"tradera": [int(t["price"]) for t in tr if t["price"] and int(t["price"]) > 0],
+              "blocket": [c["price"] for c in bl if c["price"]]}
+    quart = lambda xs, i: statistics.quantiles(xs, n=4)[i] if len(xs) > 3 else None
+    for site, total, read in (("tradera", tr_total, len(tr)), ("blocket", bl_total, len(bl))):
+        p = prices[site]
+        add(site, "listings_site_count", "", total)
+        add(site, "listings_read", "", read)
+        add(site, "median_price_sek", "", statistics.median(p) if p else None)
+        add(site, "p25_price_sek", "", quart(p, 0))
+        add(site, "p75_price_sek", "", quart(p, 2))
         for i, (lo, hi) in enumerate(PRICE_BANDS):
-            w.writerow([label(lo, hi, "kr"), round(dt[i], 1), round(db[i], 1)])
+            add(site, "price_pct", label(lo, hi, "kr"), dist(p, PRICE_BANDS)[i])
+    add("blocket", "price_bands_walked", "", len(bands))
+    for site, stem, _ in AGE_MEASURES:
+        a = ages[site][stem]
+        add(site, f"median_{stem}_days", "", statistics.median(a) if a else None)
+        for i, (lo, hi) in enumerate(AGE_BANDS):
+            add(site, f"{stem}_pct", label(lo, hi), dist(a, AGE_BANDS)[i])
+    return rows
 
-    sp = lambda x: f"{x:,.0f}".replace(",", " ")            # 12 345, Swedish style
-    med = lambda xs: statistics.median(xs) if xs else float("nan")
-    q = lambda xs, p: statistics.quantiles(xs, n=4)[p] if len(xs) > 3 else float("nan")
+
+def render(rows: list[dict], out_dir: Path) -> str:
+    """Report for ONE run from its summary rows."""
+    v = {}
+    for r in rows:
+        val = r["value"]
+        v[(r["site"], r["metric"], r["band"])] = None if val in (None, "") else float(val)
+    g = lambda site, metric, band="": v.get((site, metric, band))
+    sp = lambda x: "–" if x is None else f"{x:,.0f}".replace(",", " ")
+    d1 = lambda x: "–" if x is None else f"{x:.0f}"
+    ts = rows[0]["run_timestamp"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(out_dir / "listing_age.csv", "w", newline="") as f:
+        w = csv.writer(f, lineterminator="\n")
+        w.writerow(["age_days", *[t for _, _, t in AGE_MEASURES]])
+        for lo, hi in AGE_BANDS:
+            w.writerow([label(lo, hi), *[g(s, f"{m}_pct", label(lo, hi)) for s, m, _ in AGE_MEASURES]])
+    with open(out_dir / "price.csv", "w", newline="") as f:
+        w = csv.writer(f, lineterminator="\n")
+        w.writerow(["price_sek", "tradera_pct", "blocket_pct"])
+        for lo, hi in PRICE_BANDS:
+            b = label(lo, hi, "kr")
+            w.writerow([b, g("tradera", "price_pct", b), g("blocket", "price_pct", b)])
+
     lines = [
         "# Private cars in Sweden: Tradera vs Blocket",
         "",
-        f"Census taken {now:%Y-%m-%d %H:%M} UTC by `private_cars_se_compare.py`.",
+        f"Census of {str(ts)[:16].replace('T', ' ')} UTC, by `private_cars_se_compare.py` in the "
+        "weekly Cloud Run job. History: `history.csv` (one block per week).",
         "",
         "| | Tradera | Blocket |",
         "|---|---:|---:|",
-        f"| Private car listings (site count) | {sp(tr_total)} | {sp(bl_total)} |",
-        f"| Listings read | {sp(len(tr))} | {sp(len(bl))} |",
-        f"| Median price, kr | {sp(med(tr_price))} | {sp(med(bl_price))} |",
-        f"| Price, 25th–75th percentile, kr | {sp(q(tr_price, 0))}–{sp(q(tr_price, 2))} | "
-        f"{sp(q(bl_price, 0))}–{sp(q(bl_price, 2))} |",
-        f"| Median days since published | {med(tr_age):.0f} | {med(bl_id):.0f} (ID estimate) |",
-        f"| Median days since published or renewed | n/a | {med(bl_card):.0f} |",
+        f"| Private car listings (site count) | {sp(g('tradera', 'listings_site_count'))} | {sp(g('blocket', 'listings_site_count'))} |",
+        f"| Listings read | {sp(g('tradera', 'listings_read'))} | {sp(g('blocket', 'listings_read'))} |",
+        f"| Median price, kr | {sp(g('tradera', 'median_price_sek'))} | {sp(g('blocket', 'median_price_sek'))} |",
+        f"| Price, 25th–75th percentile, kr | {sp(g('tradera', 'p25_price_sek'))}–{sp(g('tradera', 'p75_price_sek'))} | "
+        f"{sp(g('blocket', 'p25_price_sek'))}–{sp(g('blocket', 'p75_price_sek'))} |",
+        f"| Median days since published | {d1(g('tradera', 'median_age_published_days'))} | "
+        f"{d1(g('blocket', 'median_age_published_id_estimate_days'))} (ID estimate) |",
+        f"| Median days since published or renewed | – | {d1(g('blocket', 'median_age_published_or_renewed_days'))} |",
         "",
         "## Days since published, % of listings",
         "",
-        "| days | Tradera | Blocket (ID estimate) | Blocket (published or renewed) |",
+        "| days | " + " | ".join(t for _, _, t in AGE_MEASURES) + " |",
         "|---|---:|---:|---:|",
     ]
-    for i, (lo, hi) in enumerate(AGE_BANDS):
-        lines.append(f"| {label(lo, hi)} | " + " | ".join(f"{dist(v, AGE_BANDS)[i]:.1f}" for v in series.values()) + " |")
+    for lo, hi in AGE_BANDS:
+        lines.append(f"| {label(lo, hi)} | " + " | ".join(
+            f"{g(s, f'{m}_pct', label(lo, hi)) or 0:.1f}" for s, m, _ in AGE_MEASURES) + " |")
     lines += ["", "## Price, % of listings", "", "| price, kr | Tradera | Blocket |", "|---|---:|---:|"]
-    dt, db = dist(tr_price, PRICE_BANDS), dist(bl_price, PRICE_BANDS)
-    for i, (lo, hi) in enumerate(PRICE_BANDS):
-        lines.append(f"| {label(lo, hi, 'kr')} | {dt[i]:.1f} | {db[i]:.1f} |")
+    for lo, hi in PRICE_BANDS:
+        b = label(lo, hi, "kr")
+        lines.append(f"| {b} | {g('tradera', 'price_pct', b) or 0:.1f} | {g('blocket', 'price_pct', b) or 0:.1f} |")
     lines += ["", "## How to read this", "",
               "- **Tradera** dates are exact: `startDate` of a 60-day classified. A car relisted after 60 days restarts its clock.",
               "- **Blocket (ID estimate)** is the closest Blocket gets to a publish date: ad IDs are issued in order, so an ad was created no later than the earliest card time among ads with a higher ID. It can only overstate freshness slightly, never invent age.",
               "- **Blocket (published or renewed)** is the card's own time. Renewals and paid bumps reset it, so it understates age; the gap between the two Blocket columns is how much renewing goes on.",
               "- Paid placements (\"Betald placering\") are left out of Blocket; they repeat across pages.",
-              f"- Blocket was read through {len(bands)} price bands so every listing is reachable past its 50-page search limit."]
-    (out_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    if history:
-        append_history(history, now, tr_total, bl_total, tr, bl, tr_age, bl_id, bl_card,
-                       tr_price, bl_price)
-    return "\n".join(lines)
+              f"- Blocket was read through {d1(g('blocket', 'price_bands_walked'))} price bands so every listing is reachable past its 50-page search limit."]
+    text = "\n".join(lines) + "\n"
+    (out_dir / "summary.md").write_text(text, encoding="utf-8")
+    return text
 
 
-HISTORY_COLS = ["run_date", "site", "metric", "band", "value"]
-
-
-def append_history(path: Path, now, tr_total, bl_total, tr, bl, tr_age, bl_id, bl_card,
-                   tr_price, bl_price) -> None:
-    """One dated block of rows per run, long format, so the weekly series can be
-    charted per band. A re-run on the same day replaces that day's block."""
-    d = now.date().isoformat()
-    rows = []
-    add = lambda site, metric, band, v: rows.append(
-        {"run_date": d, "site": site, "metric": metric, "band": band,
-         "value": "" if v != v else round(v, 1)})                    # NaN -> blank
-    med = lambda xs: statistics.median(xs) if xs else float("nan")
-    for site, total, read, prices in (("tradera", tr_total, len(tr), tr_price),
-                                      ("blocket", bl_total, len(bl), bl_price)):
-        add(site, "listings_site_count", "", total)
-        add(site, "listings_read", "", read)
-        add(site, "median_price_sek", "", med(prices))
-        for i, (lo, hi) in enumerate(PRICE_BANDS):
-            add(site, "price_pct", label(lo, hi, "kr"), dist(prices, PRICE_BANDS)[i])
-    for site, metric, ages in (("tradera", "age_published", tr_age),
-                               ("blocket", "age_published_id_estimate", bl_id),
-                               ("blocket", "age_published_or_renewed", bl_card)):
-        add(site, f"median_{metric}_days", "", med(ages))
-        for i, (lo, hi) in enumerate(AGE_BANDS):
-            add(site, f"{metric}_pct", label(lo, hi), dist(ages, AGE_BANDS)[i])
+def upsert_history(path: Path, rows: list[dict]) -> None:
+    """Add a run to the history CSV; a re-run on the same date replaces that date."""
+    day = rows[0]["run_timestamp"][:10]
     old = []
     if path.exists():
         with open(path, newline="", encoding="utf-8") as f:
-            old = [r for r in csv.DictReader(f) if r["run_date"] != d]
+            old = [r for r in csv.DictReader(f) if r["run_timestamp"][:10] != day]
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=HISTORY_COLS, lineterminator="\n")
+        w = csv.DictWriter(f, fieldnames=ROW_COLS, lineterminator="\n")
         w.writeheader()
-        w.writerows(old + rows)
+        w.writerows(sorted(old + rows, key=lambda r: r["run_timestamp"]))
+
+
+def write_bigquery(rows: list[dict]) -> None:
+    """Append one run. A load job, not streaming inserts: streaming into a table
+    created seconds earlier can fail with 'not found', and this runs weekly."""
+    from google.cloud import bigquery
+    client = bigquery.Client(project=BQ_TABLE.split(".")[0])
+    cfg = bigquery.LoadJobConfig(
+        schema=[bigquery.SchemaField("run_timestamp", "TIMESTAMP"),
+                bigquery.SchemaField("site", "STRING"),
+                bigquery.SchemaField("metric", "STRING"),
+                bigquery.SchemaField("band", "STRING"),
+                bigquery.SchemaField("value", "FLOAT")],
+        write_disposition="WRITE_APPEND",
+        create_disposition="CREATE_IF_NEEDED")
+    client.load_table_from_json(rows, BQ_TABLE, job_config=cfg).result()
+    log(f"[BQ] Appended {len(rows)} rows to {BQ_TABLE}")
+
+
+def render_from_history(path: Path, out_dir: Path) -> str:
+    """The Monday export: draw the report from the latest run in the history."""
+    with open(path, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    latest = max(r["run_timestamp"] for r in rows)
+    return render([r for r in rows if r["run_timestamp"] == latest], out_dir)
+
+
+def run(test: bool = False, bigquery: bool = False, out: Path | None = None,
+        history: Path | None = None) -> list[dict]:
+    now = NOW
+    tr, tr_total = tradera_census(test)
+    bl, bl_total, bands = blocket_census(test)
+    blocket_id_ages(bl)
+    rows = summarise(tr, tr_total, bl, bl_total, bands, now)
+    if bigquery:
+        write_bigquery(rows)
+    if history:
+        upsert_history(history, rows)
+    if out:
+        print(render(rows, out))
+    return rows
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--test", action="store_true")
-    ap.add_argument("--out", default=None, help="aggregate output dir (default data/private_cars_se)")
-    ap.add_argument("--history", default=None, help="append this run to a long-format history CSV")
+    ap.add_argument("--test", action="store_true", help="2 pages per site, no BigQuery")
+    ap.add_argument("--bigquery", action="store_true", help="append the run to " + BQ_TABLE)
+    ap.add_argument("--out", default=None, help="write summary.md + CSVs here")
+    ap.add_argument("--history", default=None, help="upsert the run into a history CSV")
+    ap.add_argument("--render", default=None, metavar="HISTORY_CSV",
+                    help="no scraping: render --out from the latest run in this history")
     a = ap.parse_args()
-    now = NOW
-    tr, tr_total = tradera_census(a.test)
-    bl, bl_total, bands = blocket_census(a.test)
-    blocket_id_ages(bl)
-    runs = Path("runs"); runs.mkdir(exist_ok=True)
-    stamp = now.strftime("%Y%m%dT%H%M%SZ")
-    for name, rows in (("tradera", tr), ("blocket", bl)):
-        if rows:
-            with open(runs / f"private_cars_se_{name}_{stamp}.csv", "w", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=list(rows[0].keys()) + (["id_age_min"] if name == "blocket" and "id_age_min" not in rows[0] else []))
-                w.writeheader(); w.writerows(rows)
-    out = Path(a.out) if a.out else (Path("runs/test_private_cars_se") if a.test
-                                     else Path("data/private_cars_se"))
-    print(write_outputs(tr, tr_total, bl, bl_total, bands, now, out,
-                        Path(a.history) if a.history else None))
+    if a.render:
+        print(render_from_history(Path(a.render), Path(a.out or "data/private_cars_se")))
+        return
+    run(test=a.test, bigquery=a.bigquery and not a.test,
+        out=Path(a.out) if a.out else (Path("runs/test_private_cars_se") if a.test else None),
+        history=Path(a.history) if a.history else None)
 
 
 if __name__ == "__main__":

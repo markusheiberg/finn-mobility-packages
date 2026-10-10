@@ -28,6 +28,7 @@ on:
           - probe-finn       # classify ~20 live finn listings from the runner (no writes)
           - probe-blocket    # classify ~20 live blocket listings from the runner (no writes)
           - check-deploy     # what image the job runs + recent execution history
+          - run-private-cars-se  # Tradera vs Blocket census only, in Cloud Run (writes to BigQuery)
       limit:
         description: Log lines to fetch (logs/warns only)
         required: false
@@ -104,6 +105,23 @@ jobs:
             "resource.type=cloud_run_job AND resource.labels.job_name=${JOB} AND textPayload=~\"\\[BQ\\]|\\[WARN\\]|\\[ERR\\]|Starting|Done\"" \
             --limit 300 --freshness=6h \
             --format "table(timestamp,textPayload)" --project "${PROJECT}"
+
+      - name: Run the Tradera vs Blocket census now
+        if: inputs.action == 'run-private-cars-se'
+        # ONLY=private_cars_se makes run_all.py skip the package scrapes, so this
+        # adds a census run to market_scraper.private_cars_se and no package rows.
+        # The override applies to this execution only. ~20 minutes.
+        run: |
+          set +e
+          gcloud run jobs execute "${JOB}" --update-env-vars ONLY=private_cars_se \
+            --region "${REGION}" --project "${PROJECT}" --wait
+          status=$?
+          echo "=== output ==="
+          gcloud logging read \
+            "resource.type=cloud_run_job AND resource.labels.job_name=${JOB} AND textPayload=~\"TRADERA\\] total|BLOCKET\\] total|\\[BQ\\]|\\[ERR\\]|\\[WARN\\]|census|Traceback|Error\"" \
+            --limit 200 --freshness=2h \
+            --format "table(timestamp,textPayload)" --project "${PROJECT}"
+          exit $status
 
       - name: Probe finn classification against the live site (no writes)
         if: inputs.action == 'probe-finn'

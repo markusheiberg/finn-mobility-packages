@@ -209,24 +209,31 @@ jobs:
           python-version: "3.12"
 
       - name: Tradera vs Blocket private cars (weekly)
-        # Is Tradera's growing private car stock the same kind of stock as
-        # Blocket's? Census of private car listings on both sites: days since
-        # published and price. Same shape as finn-bolig-packages' finn x hjem
-        # overlap: runs on this GitHub runner (not Cloud Run), writes the latest
-        # report to data/, appends a dated block to a history CSV so the weekly
-        # change is kept, and keeps per-listing rows in runs/ (gitignored).
+        # The census itself runs in Cloud Run, inside the Sunday mobility-packages
+        # job (run_all.py), and appends one run of summary rows to
+        # market_scraper.private_cars_se. Here: copy that table to
+        # data/private_cars_se/history.csv and render summary.md + CSVs from the
+        # latest run. Aggregates only; per-listing rows never leave Cloud Run.
         #
-        # ~40 Tradera pages + ~550 Blocket pages, 1 s apart: ~12 minutes.
-        # continue-on-error: either site changing its markup must not cost the
-        # package snapshot this workflow exists for.
+        # Skips cleanly until the first census has written the table, and
+        # continue-on-error so it can never cost the package snapshot.
         continue-on-error: true
-        timeout-minutes: 40
-        env:
-          PYTHONUNBUFFERED: "1"
         run: |
-          pip install --quiet requests beautifulsoup4
+          if ! bq show --project_id="${PROJECT}" "${PROJECT}:market_scraper.private_cars_se" >/dev/null 2>&1; then
+            echo "market_scraper.private_cars_se does not exist yet; skipping."
+            exit 0
+          fi
+          mkdir -p data/private_cars_se
+          bq query --use_legacy_sql=false --project_id="${PROJECT}" \
+            --format=csv --max_rows=1000000 \
+          "SELECT FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%S+00:00', run_timestamp) AS run_timestamp,
+                  site, metric, band, value
+             FROM \`${PROJECT}.market_scraper.private_cars_se\`
+            ORDER BY run_timestamp, site, metric, band" \
+          | grep -v '^WARNING:' > data/private_cars_se/history.csv
+          pip install --quiet requests beautifulsoup4    # module imports; --render fetches nothing
           python3 private_cars_se_compare.py \
-            --out data/private_cars_se --history data/private_cars_se/history.csv
+            --render data/private_cars_se/history.csv --out data/private_cars_se
 
       # Commit only from main. This step pushes HEAD to main, so dispatched from
       # a feature branch it would land that branch's unreviewed commits there.

@@ -46,4 +46,5 @@ jobs:
         run: |
           gcloud run jobs update $JOB_NAME \
             --image $IMAGE:$GITHUB_SHA \
-            --region $REGION
+            --region $REGION \
+            --task-timeout 3600s

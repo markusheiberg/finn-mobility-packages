@@ -32,6 +32,7 @@ Claude Code  ──push──>  GitHub  ──Actions (WIF)──>  GCP
 | `probe-finn` | runs `--test 20` against live finn.no from the runner | no |
 | `probe-blocket` | runs `--test 20` against live blocket.se from the runner | no |
 | `check-deploy` | deployed image (SHA-tagged) + recent execution history | no |
+| `run-private-cars-se` | Tradera vs Blocket census only, in Cloud Run (~20 min) | **yes** (one run in `private_cars_se`) |
 
 The probes are how you validate a detection change *before* deploying — GitHub runners can reach the scraped sites; the sandbox cannot.
 
@@ -142,15 +143,24 @@ prints the result instead. That is how to test a query change.
 ### Tradera vs Blocket, private cars (weekly, `data/private_cars_se/`)
 
 Is Tradera's growing private car stock the same kind of stock as Blocket's? A
-census of private car listings on both sites, run weekly inside `export_data.yml`
-on the GitHub runner, the same way finn-bolig-packages runs its finn x hjem
-overlap (not Cloud Run, no BigQuery). `private_cars_se_compare.py` writes:
+census of private car listings on both sites, every listing, ~20 minutes.
+
+**Runs in Cloud Run**, inside the Sunday `mobility-packages` job: `run_all.py`
+runs it after the package scrapes, in a `try`, so a census failure logs `[ERR]`
+and never touches the package rows. It appends one run of summary rows to
+`market_scraper.private_cars_se` (`run_timestamp, site, metric, band, value`).
+The job's task timeout is set to 3600s in `deploy.yml` to make room for it.
+`ops.yml` → `run-private-cars-se` runs the census alone (`ONLY=private_cars_se`),
+writing no package rows.
+
+The Monday `export_data.yml` copies the table to `data/`, then renders the
+report from the latest run (`--render`, no scraping):
 
 | File | Contents |
 |------|----------|
 | `data/private_cars_se/summary.md` | latest week: counts, medians, age and price distributions side by side |
 | `data/private_cars_se/listing_age.csv`, `price.csv` | the same distributions as tables |
-| `data/private_cars_se/history.csv` | one dated block per week, long format (`run_date, site, metric, band, value`); a re-run the same day replaces that day |
+| `data/private_cars_se/history.csv` | every weekly run, long format, from BigQuery |
 
 URLs: Tradera `category/1001?sellerType=Private` (Fordon › Bilar, cars only),
 Blocket `mobility/search/car?dealer_segment=3`.
@@ -172,7 +182,7 @@ Blocket `mobility/search/car?dealer_segment=3`.
 - Older Blocket cards show a date ("17 sep") instead of a relative time; a date
   with no year is its latest past occurrence.
 
-Only aggregates are committed; per-listing rows stay in `runs/`.
+Only aggregates are stored anywhere; per-listing rows are never written.
 
 ### BigQuery
 One row appended per run to `vend-scrapers-v2.market_scraper.mobility_packages`:
