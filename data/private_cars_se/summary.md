@@ -1,27 +1,27 @@
 # Private cars in Sweden: Tradera vs Blocket
 
-Census of 2026-10-10 18:44 UTC, by `private_cars_se_compare.py` in the weekly Cloud Run job. History: `history.csv` (one block per week).
+Census of 2026-10-11 22:02 UTC, by `private_cars_se_compare.py` in the weekly Cloud Run job. History: `history.csv` (one block per week).
 
 | | Tradera | Blocket |
 |---|---:|---:|
-| Private car listings (site count) | 3 011 | 26 601 |
-| Listings read | 3 011 | 26 441 |
-| Median price, kr | 50 000 | 72 900 |
-| Price, 25th–75th percentile, kr | 24 000–105 000 | 35 000–140 000 |
-| Median days since published | 22 | 25 (ID estimate) |
+| Private car listings (site count) | 3 035 | 26 498 |
+| Listings read | 3 035 | 26 283 |
+| Median price, kr | 50 000 | 73 000 |
+| Price, 25th–75th percentile, kr | 24 999–105 000 | 35 500–144 900 |
+| Median days since published | 21 | 24 (ID estimate) |
 | Median days since published or renewed | – | 15 |
 
 ## Days since published, % of listings
 
 | days | Tradera | Blocket (ID estimate) | Blocket (published or renewed) |
 |---|---:|---:|---:|
-| 0–1 | 3.5 | 2.9 | 5.0 |
-| 1–7 | 18.2 | 14.9 | 22.8 |
-| 7–14 | 14.3 | 14.9 | 17.8 |
-| 14–30 | 27.2 | 23.3 | 25.6 |
-| 30–60 | 36.6 | 29.5 | 28.8 |
-| 60–90 | 0.1 | 9.9 | 0.1 |
-| 90–180 | 0.0 | 4.5 | 0.0 |
+| 0–1 | 5.2 | 3.1 | 4.9 |
+| 1–7 | 17.7 | 14.1 | 22.2 |
+| 7–14 | 14.0 | 15.2 | 18.0 |
+| 14–30 | 26.7 | 24.1 | 26.5 |
+| 30–60 | 36.3 | 43.5 | 28.4 |
+| 60–90 | 0.1 | 0.0 | 0.0 |
+| 90–180 | 0.0 | 0.0 | 0.0 |
 | 180–365 | 0.0 | 0.0 | 0.0 |
 | 365+ | 0.0 | 0.0 | 0.0 |
 
@@ -29,15 +29,15 @@ Census of 2026-10-10 18:44 UTC, by `private_cars_se_compare.py` in the weekly Cl
 
 | price, kr | Tradera | Blocket |
 |---|---:|---:|
-| 0k–25k | 25.8 | 14.4 |
-| 25k–50k | 23.1 | 21.4 |
-| 50k–75k | 12.5 | 14.8 |
-| 75k–100k | 12.3 | 12.4 |
-| 100k–150k | 11.0 | 13.9 |
-| 150k–200k | 6.1 | 8.9 |
-| 200k–300k | 5.0 | 8.2 |
+| 0k–25k | 25.1 | 14.3 |
+| 25k–50k | 23.5 | 21.4 |
+| 50k–75k | 12.4 | 14.7 |
+| 75k–100k | 12.3 | 12.3 |
+| 100k–150k | 11.1 | 13.8 |
+| 150k–200k | 6.1 | 9.1 |
+| 200k–300k | 5.2 | 8.2 |
 | 300k–500k | 3.2 | 4.3 |
-| 500k+ | 1.0 | 1.7 |
+| 500k+ | 1.1 | 1.7 |
 
 ## How to read this
 
