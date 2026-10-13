@@ -184,6 +184,18 @@ Blocket `mobility/search/car?dealer_segment=3`.
 
 Only aggregates are stored anywhere; per-listing rows are never written.
 
+**Same car on both sites** (`site = both`, `overlap_*` metrics). No shared ID,
+so a car is matched on brand + model + model year + mileage (Tradera km,
+Blocket mil, ±1 mil) + fuel + gearbox, in memory, from fields the census
+already fetches (no extra requests). Tradera sellers round their mileage, so
+chance matches are real: `overlap_chance_baseline` reruns the match with the
+Blocket model year shifted by one, and `overlap_estimate` = matched − chance.
+Measured 2026-10-13: 375 matched, 57 by chance, estimate 318 (~11% of Tradera's
+private cars, ~1% of Blocket's); 228 matches had a price within 5%, against 7
+by chance. It is a lower bound: a seller who types a different mileage or model
+on each site is missed. If `overlap_chance_baseline` ever rises towards
+`overlap_matched`, the rule has gone loose; tighten it before reading the trend.
+
 ### BigQuery
 One row appended per run to `vend-scrapers-v2.market_scraper.mobility_packages`:
 
