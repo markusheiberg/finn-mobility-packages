@@ -99,6 +99,11 @@ ITEM_FIELDS = {
 }
 
 
+# Fields for matching the same car across the two sites (see overlap()).
+TRADERA_ATTRS = {"brand": "vehicle_brand", "model": "car_model", "year": "model_year_numeric",
+                 "km": "mileage", "fuel": "fuel_type", "gear": "gearbox"}
+
+
 def tradera_page(n: int) -> tuple[list[dict], int, int]:
     raw = get(f"{TRADERA_URL}&paging={n}" if n > 1 else TRADERA_URL)
     t = raw.replace('\\"', '"')
@@ -112,6 +117,9 @@ def tradera_page(n: int) -> tuple[list[dict], int, int]:
         for k, pat in ITEM_FIELDS.items():
             m = re.search(pat, block)
             it[k] = m.group(1) if m else ""
+        attrs = dict(re.findall(r'\{"name":"(\w+)","values":\["([^"]*)"', block))
+        for k, a in TRADERA_ATTRS.items():
+            it[k] = attrs.get(a, "")
         items.append(it)
     return items, total, pages
 
@@ -170,6 +178,9 @@ def rel_minutes(s: str) -> float | None:
     return None
 
 
+SPEC_RE = re.compile(r"^(\d{4})\s*∙\s*([\d\s\xa0 ]+)\s*mil(?:\s*∙\s*([^∙]+))?(?:\s*∙\s*([^∙]+))?$")
+
+
 def blocket_search(params: str, page: int = 1) -> tuple[int | None, list[dict]]:
     url = f"{BLOCKET_URL}&{params}" + (f"&page={page}" if page > 1 else "")
     soup = BeautifulSoup(get(url), "html.parser")
@@ -196,8 +207,17 @@ def blocket_search(params: str, page: int = 1) -> tuple[int | None, list[dict]]:
                 price = int(digits) if digits else None
             if age is None:
                 age = card_minutes(p)
-        cards.append({"id": m.group(1) if m else "", "price": price, "card_age_min": age,
-                      "paid": "Betald placering" in parts})
+        card = {"id": m.group(1) if m else "", "price": price, "card_age_min": age,
+                "paid": "Betald placering" in parts}
+        for i, p in enumerate(parts):          # "2016 ∙ 21 298 mil ∙ Diesel ∙ Automatisk"
+            sm = SPEC_RE.match(p)
+            if sm:
+                pre = [x for x in parts[:i] if not re.match(r"^(Pil |Bild \d|Betald placering)", x)]
+                card.update(title=pre[0] if pre else "", sub=" ".join(pre[1:]), year=sm.group(1),
+                            mil=re.sub(r"\D", "", sm.group(2)), fuel=(sm.group(3) or "").strip(),
+                            gear=(sm.group(4) or "").strip())
+                break
+        cards.append(card)
     return total, cards
 
 
@@ -254,6 +274,88 @@ def blocket_id_ages(cards: list[dict]) -> None:
 # (production, the Cloud Run job), to a history CSV (local runs), and render()
 # draws the report from them. The Monday export re-renders the report from the
 # BigQuery history, so the committed summary can never disagree with the table.
+
+# ── Same car on both sites ───────────────────────────────────────────────────
+#
+# No shared ID, so a car on both is found by brand + model + model year +
+# mileage + fuel + gearbox. Tradera mileage is km, Blocket's is mil (10 km);
+# +-1 mil absorbs rounding, and a Tradera value that equals the Blocket mil is
+# a seller who typed mil into the km field. Tradera sellers mostly round their
+# mileage, so chance matches are real: the same match run with the Blocket
+# model year shifted by one gives the count expected by chance, and
+# overlap_estimate subtracts it. Measured 2026-10-13: 375 matched, 57 by
+# chance; 177 of the matches had the identical price, against 0 by chance.
+
+def _norm(s) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(s or "").lower().replace("ë", "e").replace("é", "e"))
+
+
+BRAND_ALIAS = {"vw": "volkswagen", "mercedes": "mercedesbenz"}
+
+
+def _bl_title(b) -> str:
+    t = _norm(b.get("title"))
+    for k, v in BRAND_ALIAS.items():
+        if t.startswith(k) and not t.startswith(v):
+            t = v + t[len(k):]
+    return t
+
+
+def _same_car(t, b) -> bool:
+    brand, model = _norm(t["brand"]), _norm(t["model"])
+    title = _bl_title(b)
+    if not brand or not model or not title.startswith(brand):
+        return False
+    rest = title[len(brand):] + _norm(b.get("sub"))
+    if model.endswith(("serien", "klass")):        # BMW "5-serien" ~ 520d, Mercedes "E-klass" ~ E 220
+        ok = rest.startswith(model[0])
+    else:
+        ok = rest.startswith(model)
+    return (ok and _norm(t["fuel"])[:3] == _norm(b.get("fuel"))[:3]
+            and _norm(t["gear"])[:3] == _norm(b.get("gear"))[:3])
+
+
+def match_pairs(tr: list[dict], bl: list[dict], year_shift: int = 0) -> list[tuple[dict, dict]]:
+    idx: dict[tuple[int, int], list[dict]] = {}
+    for b in bl:
+        if b.get("year") and b.get("mil"):
+            idx.setdefault((int(b["year"]) + year_shift, int(b["mil"])), []).append(b)
+    pairs, used = [], set()
+    for t in tr:
+        if not (t.get("year", "").isdigit() and t.get("km", "").isdigit()):
+            continue
+        k, cands = int(t["km"]), []
+        for mil in {round(k / 10), k}:
+            for dm in (-1, 0, 1):
+                cands += [b for b in idx.get((int(t["year"]), mil + dm), [])
+                          if b["id"] not in used and _same_car(t, b)]
+        if cands:
+            tp = int(t["price"] or 0)
+            b = min(cands, key=lambda c: abs((c["price"] or 0) - tp))
+            used.add(b["id"])
+            pairs.append((t, b))
+    return pairs
+
+
+def overlap(tr: list[dict], bl: list[dict]) -> dict:
+    private = [t for t in tr if t.get("sellerIsCompany") != "true"]
+    gap = lambda t, b: abs(int(t["price"] or 0) - (b["price"] or 0)) / max(b["price"] or 1, 1)
+    pairs, chance = match_pairs(private, bl), match_pairs(private, bl, year_shift=1)
+    est = max(len(pairs) - len(chance), 0)
+    tr_n = sum(1 for t in private if t.get("year", "").isdigit() and t.get("km", "").isdigit())
+    bl_n = sum(1 for b in bl if b.get("year") and b.get("mil"))
+    return {
+        "overlap_matched": len(pairs),
+        "overlap_chance_baseline": len(chance),
+        "overlap_estimate": est,
+        "overlap_same_price_5pct": sum(gap(*p) <= 0.05 for p in pairs),
+        "overlap_same_price_5pct_chance": sum(gap(*p) <= 0.05 for p in chance),
+        "overlap_tradera_matchable": tr_n,
+        "overlap_blocket_matchable": bl_n,
+        "overlap_pct_of_tradera": 100 * est / tr_n if tr_n else None,
+        "overlap_pct_of_blocket": 100 * est / bl_n if bl_n else None,
+    }
+
 
 BQ_TABLE = "vend-scrapers-v2.market_scraper.private_cars_se"
 ROW_COLS = ["run_timestamp", "site", "metric", "band", "value"]
@@ -320,6 +422,8 @@ def summarise(tr, tr_total, bl, bl_total, bands, now: datetime) -> list[dict]:
         for i, (lo, hi) in enumerate(PRICE_BANDS):
             add(site, "price_pct", label(lo, hi, "kr"), dist(p, PRICE_BANDS)[i])
     add("blocket", "price_bands_walked", "", len(bands))
+    for metric, val in overlap(tr, bl).items():
+        add("both", metric, "", val)
     for site, stem, _ in AGE_MEASURES:
         a = ages[site][stem]
         add(site, f"median_{stem}_days", "", statistics.median(a) if a else None)
@@ -381,6 +485,18 @@ def render(rows: list[dict], out_dir: Path) -> str:
     for lo, hi in PRICE_BANDS:
         b = label(lo, hi, "kr")
         lines.append(f"| {b} | {g('tradera', 'price_pct', b) or 0:.1f} | {g('blocket', 'price_pct', b) or 0:.1f} |")
+    if g("both", "overlap_matched") is not None:
+        lines += ["", "## Same car on both sites", "",
+                  "| | cars |", "|---|---:|",
+                  f"| Matched (brand, model, year, mileage, fuel, gearbox) | {sp(g('both', 'overlap_matched'))} |",
+                  f"| Expected by chance (same match, model year shifted one) | {sp(g('both', 'overlap_chance_baseline'))} |",
+                  f"| **Estimated on both** | **{sp(g('both', 'overlap_estimate'))}** |",
+                  f"| …share of Tradera private cars | {g('both', 'overlap_pct_of_tradera') or 0:.1f}% |",
+                  f"| …share of Blocket private cars | {g('both', 'overlap_pct_of_blocket') or 0:.1f}% |",
+                  f"| Matches with price within 5% (by chance) | {sp(g('both', 'overlap_same_price_5pct'))} "
+                  f"({sp(g('both', 'overlap_same_price_5pct_chance'))}) |",
+                  "",
+                  "A lower bound: a car whose seller typed a different mileage or model on each site is not matched."]
     lines += ["", "## How to read this", "",
               "- **Tradera** dates are exact: `startDate` of a 60-day classified. A car relisted after 60 days restarts its clock.",
               "- **Blocket (ID estimate)** is the closest Blocket gets to a publish date: ad IDs are issued in order, so an ad was created no later than the earliest card time among ads with a higher ID. It can only overstate freshness slightly, never invent age.",
