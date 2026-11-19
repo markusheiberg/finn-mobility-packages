@@ -366,6 +366,19 @@ def _write_to_bigquery(run_dt: datetime, df: pd.DataFrame):
     total_basis = int(df["basis_count"].sum())
     total = total_premium + total_pluss + total_basis
 
+    # A run that classified nothing is a failed run, not a week with no dealers.
+    # Written as 0/0/0 it reads downstream as a measurement. On 2026-11-15 finn
+    # answered every ad-page fetch with 403: search pages still worked, so the
+    # listings were collected, then classify_dealer() returned None for each one
+    # and every bucket counted zero. That row left blank shares in
+    # weekly_package_mix that crashed vend-market-data's build. A skipped week
+    # shows in health.md as STALE; a zero row only as data. Returns rather than
+    # exits, so run_all.py still runs the other site and the census.
+    if total == 0:
+        log("[ERR] finn: every bucket classified zero listings — NOT writing "
+            "a BigQuery row. Check the [ERR] lines above for fetch failures.")
+        return
+
     client = bigquery.Client(project=BQ_PROJECT)
     table_ref = f"{BQ_PROJECT}.{BQ_DATASET}.{BQ_TABLE}"
 
