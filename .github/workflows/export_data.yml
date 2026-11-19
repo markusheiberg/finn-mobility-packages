@@ -204,6 +204,58 @@ jobs:
 
           echo '```' >> data/health.md
 
+          # The census runs LAST in the same Cloud Run job (run_all.py), and its
+          # failure is caught there on purpose so the package rows survive. The
+          # job therefore exits 0 and nothing else notices: on 2026-11-15
+          # tradera.com answered the census with 403, it wrote nothing, and the
+          # only trace was one [ERR] line in the logs.
+          #
+          # Staleness alone would NOT have caught that. This export runs Monday
+          # 06:00 UTC, when the previous Sunday's census is ~7 days old, so an
+          # 8-day rule reads OK and the next Sunday has usually overwritten the
+          # question. The signature of a missed census is that the SAME job wrote
+          # package rows after it: normally the census timestamp is the latest.
+          {
+            echo
+            echo "## Tradera vs Blocket private car census"
+            echo
+            echo "Runs last in the same Sunday job, and its failure does not fail the"
+            echo "job — so this line is the only thing that notices one."
+            echo
+            echo "- **OK** — the latest census is from the latest job run"
+            echo "- **MISSED** — the job wrote package rows more than 12h after the latest"
+            echo "  census: it ran, but the census failed (2026-11-15: Tradera answered 403)."
+            echo "  Check ops.yml -> warns for the census [ERR]"
+            echo "- **STALE** — no census in more than 8 days and no newer package run"
+            echo "  either: the whole job has probably stopped"
+            echo
+            echo '```'
+          } >> data/health.md
+
+          bq_q --format=pretty \
+          "WITH c AS (
+             SELECT MAX(run_timestamp) AS census_ts
+               FROM \`${PROJECT}.market_scraper.private_cars_se\`
+           ),
+           p AS (
+             SELECT MAX(run_timestamp) AS package_ts
+               FROM \`${PROJECT}.market_scraper.mobility_packages\`
+           )
+           SELECT FORMAT_TIMESTAMP('%Y-%m-%d %H:%M', c.census_ts) AS latest_census,
+                  TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), c.census_ts, DAY) AS age_days,
+                  FORMAT_TIMESTAMP('%Y-%m-%d %H:%M', p.package_ts) AS latest_package_run,
+                  (SELECT COUNT(*) FROM \`${PROJECT}.market_scraper.private_cars_se\`
+                    WHERE run_timestamp = c.census_ts) AS census_rows,
+                  CASE
+                    WHEN c.census_ts IS NULL THEN 'NO CENSUS'
+                    WHEN TIMESTAMP_DIFF(p.package_ts, c.census_ts, HOUR) > 12 THEN 'MISSED'
+                    WHEN TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), c.census_ts, DAY) > 8 THEN 'STALE'
+                    ELSE 'OK'
+                  END AS status
+             FROM c CROSS JOIN p" >> data/health.md
+
+          echo '```' >> data/health.md
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
