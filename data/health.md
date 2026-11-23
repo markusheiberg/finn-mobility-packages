@@ -1,6 +1,6 @@
 # Scraper health
 
-Generated 2026-11-19 11:22 UTC by .github/workflows/export_data.yml
+Generated 2026-11-23 17:19 UTC by .github/workflows/export_data.yml
 
 Weekly scrape: Sundays 23:50 Oslo, one row per site per run.
 
@@ -20,8 +20,8 @@ status per site:
 +---------+------------------+----------+-------------+------------+---------------+-------------+-------------+--------+
 |  site   |    latest_run    | age_days | total_count | prev_total | premium_count | pluss_count | basis_count | status |
 +---------+------------------+----------+-------------+------------+---------------+-------------+-------------+--------+
-| blocket | 2026-11-15 22:53 |        3 |       13039 |      12817 |          3894 |          81 |        9064 | OK     |
-| finn    | 2026-11-08 22:50 |       10 |        5690 |       5586 |          2331 |        1408 |        1951 | STALE  |
+| blocket | 2026-11-22 22:55 |        0 |       13270 |      13039 |          3923 |          99 |        9248 | OK     |
+| finn    | 2026-11-22 22:50 |        0 |        5914 |       5690 |          2493 |        1419 |        2002 | OK     |
 +---------+------------------+----------+-------------+------------+---------------+-------------+-------------+--------+
 ```
 
@@ -46,4 +46,24 @@ Shares, not counts, so the 2026-07-20 sample change (5% -> 10%) does not flag.
 | blocket | 2026-05-17 21:53 |             0 |           0 |        5940 |        5940 |         0.0 |              32.2 | MIX SHIFT; PREMIUM ZERO;  |
 | blocket | 2026-05-24 21:53 |             0 |           0 |        5986 |        5986 |         0.0 |              32.2 | MIX SHIFT; PREMIUM ZERO;  |
 +---------+------------------+---------------+-------------+-------------+-------------+-------------+-------------------+---------------------------+
+```
+
+## Tradera vs Blocket private car census
+
+Runs last in the same Sunday job, and its failure does not fail the
+job — so this line is the only thing that notices one.
+
+- **OK** — the latest census is from the latest job run
+- **MISSED** — the job wrote package rows more than 12h after the latest
+  census: it ran, but the census failed (2026-11-15: Tradera answered 403).
+  Check ops.yml -> warns for the census [ERR]
+- **STALE** — no census in more than 8 days and no newer package run
+  either: the whole job has probably stopped
+
+```
++------------------+----------+--------------------+-------------+--------+
+|  latest_census   | age_days | latest_package_run | census_rows | status |
++------------------+----------+--------------------+-------------+--------+
+| 2026-11-08 23:01 |       14 | 2026-11-22 22:55   |          68 | MISSED |
++------------------+----------+--------------------+-------------+--------+
 ```
